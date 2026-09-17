@@ -1,0 +1,51 @@
+# ==============================================================================
+# deploy-manifest.txt — the definitive list of what is copied to a target server
+#
+# Single source of truth. scripts/stage_bundle.sh builds bundles from this file,
+# CI verifies every entry exists, and the container will reuse it unchanged.
+#
+# Format:  <class> <path>
+#
+#   required  must exist; staging fails if missing
+#   optional  copied when present; absence is not an error
+#
+# Two things are deliberately NOT listed here:
+#
+#   1. The RPM packages. Exactly one CrowdStrike sensor and one Tanium client
+#      are chosen at stage time from the target's detected EL version and
+#      architecture. Shipping all 14 would move 548 MB per host instead of 88 MB.
+#
+#   2. securitytools.env. Secrets are pushed on a separate SSH channel straight
+#      to a 0600 file and shredded after the run, so they never sit inside a
+#      tarball, a container image layer, or a command line visible to `ps`.
+# ==============================================================================
+
+# --- Orchestrator: the entry point invoked on the target ----------------------
+required  security.sh
+
+# --- Platform detection, package selection and RPM validation -----------------
+required  lib/pkg_select.sh
+
+# --- Azure Arc onboarding, executed by the sentinel component -----------------
+required  sentinel_core.sh
+
+# --- Tanium client registration data ------------------------------------------
+required  tanium/tanium-init.dat
+
+# --- Rollback ------------------------------------------------------------------
+optional  uninstall.sh
+
+# --- Standalone per-component installers --------------------------------------
+# security.sh does not call these; they are shipped so an operator can run a
+# single component by hand on the target during incident response.
+optional  install_crowdstrike.sh
+optional  install_tanium.sh
+optional  install_cmdbsync.sh
+optional  install_sentinel.sh
+optional  install_syslog.sh
+
+# --- Red Hat Subscription Manager registration --------------------------------
+# Note: sub-reg.sh hardcodes rhel-9-for-x86_64-* repository names and will
+# mis-register el7/el8/el10 hosts. Shipped for parity with the existing
+# workflow, but do not run it on non-el9 targets until it is parameterised.
+optional  sub-reg.sh

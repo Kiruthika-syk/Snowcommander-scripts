@@ -1,0 +1,327 @@
+name: Deploy security tools
+
+# Manual only — this workflow changes production servers.
+#
+# REQUIRES A SELF-HOSTED RUNNER inside the corporate network. GitHub-hosted
+# runners have no route to *.strykercorp.com and cannot reach the targets.
+#
+# The runner also supplies the RPM repositories from local disk
+# (RPM_SOURCE_DIR) rather than from git: the packages total ~548 MB and
+# individual sensors approach GitHub's 100 MB per-file limit.
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: 'Comma-separated hostnames, or a path on the runner to a newline-delimited host file'
+        required: true
+        type: string
+      components:
+        description: 'Components to deploy (ignored for plan and verify)'
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - tanium
+          - crowdstrike
+          - cmdbsync
+          - sentinel
+          - syslog
+          - 'crowdstrike tanium'
+      mode:
+        description: 'plan = detect and validate only; verify = report state; deploy = apply changes'
+        required: true
+        default: plan
+        type: choice
+        options: [plan, verify, deploy]
+      ssh_user:
+        description: 'SSH user on the target hosts'
+        required: true
+        default: tpx-admin
+        type: string
+      keep_going:
+        description: 'Continue to remaining hosts after a failure'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  # One deployment at a time, and never cancel a run mid-change.
+  group: security-tools-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: "${{ inputs.mode }} / ${{ inputs.components }}"
+    runs-on: [self-hosted, linux, snowcommander]
+    timeout-minutes: 120
+
+    # Gate mutating runs behind a reviewer. Configure the 'production'
+    # environment with required reviewers in repository settings.
+    environment: ${{ inputs.mode == 'deploy' && 'production' || '' }}
+
+    env:
+      RPM_SOURCE_DIR: /opt/snowcommander-packages
+      REMOTE_DIR: /var/tmp/sectools
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mask secrets in all log output
+        env:
+          FALCON_PROVISIONING_TOKEN: ${{ secrets.FALCON_PROVISIONING_TOKEN }}
+          CMDBSYNC_PASSWORD: ${{ secrets.CMDBSYNC_PASSWORD }}
+          AZCM_SP_SECRET: ${{ secrets.AZCM_SP_SECRET }}
+          RHSM_PASSWORD: ${{ secrets.RHSM_PASSWORD }}
+        run: |
+          set -Eeuo pipefail
+          # Actions masks repository secrets automatically; re-registering also
+          # covers values that pass through sub-processes.
+          for v in FALCON_PROVISIONING_TOKEN CMDBSYNC_PASSWORD AZCM_SP_SECRET RHSM_PASSWORD; do
+            value="${!v:-}"
+            [[ -n "$value" ]] && echo "::add-mask::$value"
+          done
+          echo "masking configured"
+
+      - name: Stage RPM repositories from runner-local storage
+        run: |
+          set -Eeuo pipefail
+          shopt -s nullglob
+
+          if [[ ! -d "$RPM_SOURCE_DIR" ]]; then
+            echo "::error::$RPM_SOURCE_DIR not found on this runner."
+            echo "Populate it with crowdstrike/ and tanium/ package directories."
+            exit 1
+          fi
+
+          existing=(crowdstrike/*.rpm)
+          if (( ${#existing[@]} == 0 )); then
+            mkdir -p crowdstrike tanium
+            # Hard-link when possible to avoid copying ~548 MB per run.
+            cp -al "$RPM_SOURCE_DIR"/crowdstrike/*.rpm crowdstrike/ 2>/dev/null \
+              || cp "$RPM_SOURCE_DIR"/crowdstrike/*.rpm crowdstrike/
+            cp -al "$RPM_SOURCE_DIR"/tanium/*.rpm tanium/ 2>/dev/null \
+              || cp "$RPM_SOURCE_DIR"/tanium/*.rpm tanium/
+          fi
+
+          if [[ ! -f tanium/tanium-init.dat ]]; then
+            cp "$RPM_SOURCE_DIR"/tanium/tanium-init.dat tanium/
+          fi
+
+          echo "crowdstrike: $(ls -1 crowdstrike/*.rpm | wc -l) packages"
+          echo "tanium:      $(ls -1 tanium/*.rpm | wc -l) packages"
+
+      - name: Verify package integrity before touching any host
+        run: |
+          set -Eeuo pipefail
+          fail=0
+          for f in crowdstrike/*.rpm tanium/*.rpm; do
+            if rpm -K --nosignature "$f" 2>&1 | grep -qi 'NOT OK'; then
+              echo "::error::corrupt package, refusing to deploy: $f"
+              fail=1
+            else
+              printf '  digests ok  %s\n' "$(basename "$f")"
+            fi
+          done
+          exit "$fail"
+
+      - name: Install the deployment SSH key
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          set -Eeuo pipefail
+          if [[ -z "${DEPLOY_SSH_KEY:-}" ]]; then
+            echo "::error::repository secret DEPLOY_SSH_KEY is not set"
+            exit 1
+          fi
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/deploy_key"
+          chmod 600 "$HOME/.ssh/deploy_key"
+
+          if [[ -n "${SSH_KNOWN_HOSTS:-}" ]]; then
+            printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+            chmod 644 "$HOME/.ssh/known_hosts"
+            echo "host key verification enabled"
+          else
+            echo "::warning::SSH_KNOWN_HOSTS is not set; host keys are trusted on first use"
+          fi
+
+      - name: Resolve the target list
+        run: |
+          set -Eeuo pipefail
+          raw='${{ inputs.targets }}'
+          if [[ -f "$raw" ]]; then
+            echo "reading hosts from file: $raw"
+            grep -vE '^\s*(#|$)' "$raw" > /tmp/targets.txt
+          else
+            printf '%s\n' "${raw//,/$'\n'}" \
+              | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+              | grep -vE '^$' > /tmp/targets.txt
+          fi
+          echo "resolved $(wc -l < /tmp/targets.txt) target(s):"
+          sed 's/^/  /' /tmp/targets.txt
+
+      - name: "Run ${{ inputs.mode }} across all targets"
+        env:
+          SSH_USER: ${{ inputs.ssh_user }}
+          COMPONENTS: ${{ inputs.components }}
+          MODE: ${{ inputs.mode }}
+          KEEP_GOING: ${{ inputs.keep_going }}
+          FALCON_CID: ${{ vars.FALCON_CID }}
+          FALCON_PROVISIONING_TOKEN: ${{ secrets.FALCON_PROVISIONING_TOKEN }}
+          CMDBSYNC_PASSWORD: ${{ secrets.CMDBSYNC_PASSWORD }}
+          CMDBSYNC_UID: ${{ vars.CMDBSYNC_UID }}
+          CMDBSYNC_GID: ${{ vars.CMDBSYNC_GID }}
+          AZCM_SP_CLIENT_ID: ${{ secrets.AZCM_SP_CLIENT_ID }}
+          AZCM_SP_SECRET: ${{ secrets.AZCM_SP_SECRET }}
+          AZCM_SUBSCRIPTION_ID: ${{ secrets.AZCM_SUBSCRIPTION_ID }}
+          AZCM_TENANT_ID: ${{ secrets.AZCM_TENANT_ID }}
+          AZCM_RESOURCE_GROUP: ${{ vars.AZCM_RESOURCE_GROUP }}
+          AZCM_LOCATION: ${{ vars.AZCM_LOCATION }}
+          AZCM_CLOUD: ${{ vars.AZCM_CLOUD }}
+          AZCM_TAGS: ${{ vars.AZCM_TAGS }}
+          SYSLOG_SERVER1: ${{ vars.SYSLOG_SERVER1 }}
+          SYSLOG_SERVER2: ${{ vars.SYSLOG_SERVER2 }}
+          SYSLOG_PORT: ${{ vars.SYSLOG_PORT }}
+        run: |
+          set -Eeuo pipefail
+
+          SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15 -i "$HOME/.ssh/deploy_key")
+          if [[ ! -f "$HOME/.ssh/known_hosts" ]]; then
+            SSH_OPTS+=(-o StrictHostKeyChecking=accept-new)
+          fi
+
+          # Render the secrets file once, mode 600, shredded on exit.
+          ENVFILE="$(mktemp)"
+          chmod 600 "$ENVFILE"
+          trap 'shred -u "$ENVFILE" 2>/dev/null || rm -f "$ENVFILE"' EXIT
+          {
+            printf 'FALCON_CID=%s\n'                "${FALCON_CID:-}"
+            printf 'FALCON_PROVISIONING_TOKEN=%s\n' "${FALCON_PROVISIONING_TOKEN:-}"
+            printf 'CMDBSYNC_PASSWORD=%s\n'         "${CMDBSYNC_PASSWORD:-}"
+            printf 'CMDBSYNC_UID=%s\n'              "${CMDBSYNC_UID:-2800}"
+            printf 'CMDBSYNC_GID=%s\n'              "${CMDBSYNC_GID:-1700}"
+            printf 'AZCM_SP_CLIENT_ID=%s\n'         "${AZCM_SP_CLIENT_ID:-}"
+            printf 'AZCM_SP_SECRET=%s\n'            "${AZCM_SP_SECRET:-}"
+            printf 'AZCM_SUBSCRIPTION_ID=%s\n'      "${AZCM_SUBSCRIPTION_ID:-}"
+            printf 'AZCM_TENANT_ID=%s\n'            "${AZCM_TENANT_ID:-}"
+            printf 'AZCM_RESOURCE_GROUP=%s\n'       "${AZCM_RESOURCE_GROUP:-}"
+            printf 'AZCM_LOCATION=%s\n'             "${AZCM_LOCATION:-eastus2}"
+            printf 'AZCM_CLOUD=%s\n'                "${AZCM_CLOUD:-AzureCloud}"
+            printf 'AZCM_TAGS=%s\n'                 "${AZCM_TAGS:-Environment=Production}"
+            printf 'SYSLOG_SERVER1=%s\n'            "${SYSLOG_SERVER1:-10.132.118.100}"
+            printf 'SYSLOG_SERVER2=%s\n'            "${SYSLOG_SERVER2:-10.50.118.100}"
+            printf 'SYSLOG_PORT=%s\n'               "${SYSLOG_PORT:-514}"
+          } > "$ENVFILE"
+
+          RESULTS="$(mktemp)"
+          overall=0
+
+          record() {
+            printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$RESULTS"
+          }
+
+          while IFS= read -r host; do
+            [[ -z "$host" ]] && continue
+            echo "::group::$host"
+            host_failed=0
+
+            if ! ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" true 2>/dev/null; then
+              echo "UNREACHABLE over SSH"
+              record "$host" "-" UNREACHABLE "ssh connection failed"
+              host_failed=1
+            elif ! ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" 'sudo -n true' 2>/dev/null; then
+              echo "passwordless sudo unavailable"
+              record "$host" "-" NO_SUDO "sudo -n failed"
+              host_failed=1
+            elif ! ./scripts/stage_bundle.sh --probe "${SSH_USER}@${host}" \
+                    --tar > /tmp/bundle.tar.gz 2>/tmp/stage.err; then
+              echo "bundle staging failed:"
+              sed 's/^/    /' /tmp/stage.err
+              record "$host" "-" STAGE_FAILED "$(tail -1 /tmp/stage.err | tr '\t' ' ')"
+              host_failed=1
+            fi
+
+            if (( host_failed )); then
+              overall=1
+              echo "::endgroup::"
+              if [[ "$KEEP_GOING" == "true" ]]; then continue; else break; fi
+            fi
+
+            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" \
+              "rm -rf ${REMOTE_DIR} && mkdir -p ${REMOTE_DIR}"
+            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" \
+              "tar -C ${REMOTE_DIR} -xzf -" < /tmp/bundle.tar.gz
+
+            # Secrets travel on their own channel, straight into a 0600 file.
+            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" \
+              "umask 077; cat > ${REMOTE_DIR}/securitytools.env" < "$ENVFILE"
+
+            case "$MODE" in
+              plan) remote_args="plan" ;;
+              verify) remote_args="verify" ;;
+              deploy) remote_args="$COMPONENTS" ;;
+            esac
+
+            rc=0
+            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" \
+              "sudo ${REMOTE_DIR}/security.sh ${remote_args}" > /tmp/out.txt 2>&1 || rc=$?
+            cat /tmp/out.txt
+
+            # Remove the secrets file even when the run failed.
+            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" \
+              "shred -u ${REMOTE_DIR}/securitytools.env 2>/dev/null || rm -f ${REMOTE_DIR}/securitytools.env" \
+              || echo "::warning::could not remove securitytools.env on ${host}"
+
+            # security.sh emits a parseable status block; fall back to exit code.
+            if grep -q '^###SECTOOLS_STATUS_BEGIN' /tmp/out.txt; then
+              while IFS= read -r line; do
+                comp="$(sed -n 's/^component=\([^ ]*\).*/\1/p' <<<"$line")"
+                cstat="$(sed -n 's/.*status=\([^ ]*\).*/\1/p' <<<"$line")"
+                cdet="$(sed -n 's/.*detail=//p' <<<"$line")"
+                record "$host" "$comp" "$cstat" "$cdet"
+              done < <(grep '^component=' /tmp/out.txt)
+
+              overall_status="$(sed -n 's/^overall=//p' /tmp/out.txt | tail -1)"
+              if [[ "$overall_status" != "SUCCESS" ]]; then
+                overall=1
+              fi
+              # plan emits no component lines; record the platform instead.
+              if ! grep -q '^component=' /tmp/out.txt; then
+                el="$(sed -n 's/^el=//p' /tmp/out.txt | tail -1)"
+                arch="$(sed -n 's/^arch=//p' /tmp/out.txt | tail -1)"
+                fp="$(sed -n 's/^falcon_package=//p' /tmp/out.txt | tail -1)"
+                record "$host" "plan" "$overall_status" "el${el} ${arch} -> ${fp}"
+              fi
+            else
+              record "$host" "-" NO_STATUS "exit ${rc}"
+              overall=1
+            fi
+
+            echo "::endgroup::"
+          done < /tmp/targets.txt
+
+          {
+            echo "## ${MODE} — ${COMPONENTS}"
+            echo
+            echo "| Host | Component | Status | Detail |"
+            echo "|------|-----------|--------|--------|"
+            while IFS=$'\t' read -r h c s d; do
+              echo "| \`${h}\` | ${c} | ${s} | ${d} |"
+            done < "$RESULTS"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo
+          echo "=== result matrix ==="
+          column -t -s $'\t' "$RESULTS" 2>/dev/null || cat "$RESULTS"
+
+          exit "$overall"
+
+      - name: Remove the deployment key
+        if: always()
+        run: shred -u "$HOME/.ssh/deploy_key" 2>/dev/null || rm -f "$HOME/.ssh/deploy_key"

@@ -1,0 +1,282 @@
+name: CI
+
+# Validation only. This workflow never contacts a target server and never
+# needs a secret, so it is safe to run on GitHub-hosted runners.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shell-lint:
+    name: Shell lint and syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+
+      - name: Syntax check every script
+        run: |
+          set -Eeuo pipefail
+          fail=0
+          while IFS= read -r f; do
+            if bash -n "$f"; then
+              printf '  OK      %s\n' "$f"
+            else
+              printf '  SYNTAX  %s\n' "$f"
+              fail=1
+            fi
+          done < <(find . -name '*.sh' -not -path './.git/*' | sort)
+          exit "$fail"
+
+      - name: ShellCheck
+        run: |
+          set -Eeuo pipefail
+          # SC1091: sourced files are resolved at runtime on the target.
+          find . -name '*.sh' -not -path './.git/*' -print0 \
+            | xargs -0 shellcheck --severity=warning --exclude=SC1091
+
+  manifest:
+    name: Deployment manifest integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Every required file in the manifest must exist
+        run: |
+          set -Eeuo pipefail
+          missing=0
+          while IFS=$' \t' read -r class path _rest; do
+            [[ -z "${class:-}" || -z "${path:-}" ]] && continue
+            case "$class" in
+              required)
+                if [[ -f "$path" ]]; then
+                  printf '  present  %s\n' "$path"
+                else
+                  printf '  MISSING  %s\n' "$path"
+                  missing=1
+                fi
+                ;;
+              optional)
+                [[ -f "$path" ]] \
+                  && printf '  optional %s\n' "$path" \
+                  || printf '  absent   %s (optional)\n' "$path"
+                ;;
+            esac
+          done < <(sed 's/#.*//' deploy-manifest.txt)
+          exit "$missing"
+
+      - name: The manifest must never ship a secrets file
+        run: |
+          set -Eeuo pipefail
+          if grep -qE '^\s*(required|optional)\s+securitytools\.env\s*$' deploy-manifest.txt; then
+            echo "::error::deploy-manifest.txt lists securitytools.env; secrets must travel on a separate channel"
+            exit 1
+          fi
+          echo "manifest correctly excludes securitytools.env"
+
+  secret-hygiene:
+    name: Secret hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: A populated securitytools.env must never be committed
+        run: |
+          set -Eeuo pipefail
+          if git ls-files --error-unmatch securitytools.env >/dev/null 2>&1; then
+            echo "::error::securitytools.env is tracked in git. Remove it with 'git rm --cached securitytools.env' and rotate every credential it contained."
+            exit 1
+          fi
+          echo "securitytools.env is not tracked"
+
+      - name: No private keys or credential files in the tree
+        run: |
+          set -Eeuo pipefail
+          hits="$(git ls-files \
+            | grep -iE '(^|/)(id_rsa|id_ed25519|.*\.pem|.*\.key|.*creds.*|.*vault\.ya?ml)$' \
+            | grep -vE '\.example$' || true)"
+          if [[ -n "$hits" ]]; then
+            echo "::error::credential-shaped files are tracked:"
+            printf '%s\n' "$hits"
+            exit 1
+          fi
+          echo "no credential-shaped files tracked"
+
+      - name: Templates must not contain real secret values
+        run: |
+          set -Eeuo pipefail
+          fail=0
+          for key in FALCON_PROVISIONING_TOKEN CMDBSYNC_PASSWORD AZCM_SP_SECRET RHSM_PASSWORD; do
+            value="$(grep -E "^${key}=" securitytools.env.example 2>/dev/null | cut -d= -f2- || true)"
+            if [[ -n "$value" && "$value" != "REPLACE_ME" ]]; then
+              echo "::error::securitytools.env.example has a non-placeholder value for ${key}"
+              fail=1
+            fi
+          done
+          exit "$fail"
+
+      - name: CID must be consistent across the repository
+        env:
+          # The CID is an identifier, not a credential, so pinning it here is fine.
+          EXPECTED_CID: D204F3B9227D492DA43F7AF999501417-FF
+        run: |
+          set -Eeuo pipefail
+          # Assembled from fragments so this check cannot match its own source.
+          stale_cid="6ad2fe798c9d4a3""38b586baa920667c0"
+          stale="$(grep -rniF "$stale_cid" . --exclude-dir=.git || true)"
+          if [[ -n "$stale" ]]; then
+            echo "::error::the superseded CrowdStrike CID is still referenced:"
+            printf '%s\n' "$stale"
+            exit 1
+          fi
+          actual="$(grep -E '^FALCON_CID=' securitytools.env.example | cut -d= -f2-)"
+          if [[ "$actual" != "$EXPECTED_CID" ]]; then
+            echo "::error::securitytools.env.example CID is '${actual}', expected '${EXPECTED_CID}'"
+            exit 1
+          fi
+          echo "CID is consistent: ${EXPECTED_CID}"
+
+      - name: falconctl force-flag test must tolerate any checksum suffix
+        run: |
+          set -Eeuo pipefail
+          # A literal *-F0 test silently stops matching when the tenant CID
+          # changes suffix, so falconctl would refuse to re-register a host.
+          if grep -rn 'FALCON_CID" == \*-F0' --include='*.sh' .; then
+            echo "::error::found a hardcoded -F0 CID suffix test; use *-[0-9A-Fa-f][0-9A-Fa-f]"
+            exit 1
+          fi
+          echo "no hardcoded -F0 suffix tests"
+
+  platform-matrix:
+    name: Package selection matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rpm tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq rpm
+
+      - name: OS detection covers every supported distribution
+        run: |
+          set -Eeuo pipefail
+          source lib/pkg_select.sh
+
+          check() {
+            local id="$1" ver="$2" like="$3" want_rc="$4" label="$5"
+            local dir; dir="$(mktemp -d)"
+            printf 'ID=%s\nVERSION_ID="%s"\nPRETTY_NAME="%s"\nID_LIKE="%s"\n' \
+              "$id" "$ver" "$label" "$like" > "$dir/os-release"
+            local rc=0
+            SECTOOLS_OS_RELEASE_FILE="$dir/os-release" sectools_detect_platform >/dev/null 2>&1 || rc=$?
+            rm -rf "$dir"
+            if [[ "$rc" == "$want_rc" ]]; then
+              printf '  OK    %-28s rc=%s\n' "$label" "$rc"
+            else
+              printf '  FAIL  %-28s rc=%s, expected %s\n' "$label" "$rc" "$want_rc"
+              return 1
+            fi
+          }
+
+          fail=0
+          check rhel   9.6  ''                 0 'RHEL 9.6'            || fail=1
+          check rhel   10.0 ''                 0 'RHEL 10.0'           || fail=1
+          check centos 8    'rhel fedora'      0 'CentOS 8'            || fail=1
+          check rocky  9.3  'rhel centos'      0 'Rocky Linux 9.3'     || fail=1
+          check almalinux 9.3 'rhel centos'    0 'AlmaLinux 9.3'       || fail=1
+          check ol     8.9  'fedora'           0 'Oracle Linux 8.9'    || fail=1
+          check ubuntu 22.04 'debian'          3 'Ubuntu 22.04'        || fail=1
+          check debian 12   ''                 3 'Debian 12'           || fail=1
+          check fedora 40   ''                 3 'Fedora 40'           || fail=1
+          exit "$fail"
+
+      - name: Package selection resolves for every staged EL/arch pair
+        run: |
+          set -Eeuo pipefail
+          shopt -s nullglob
+          rpms=(crowdstrike/*.rpm tanium/*.rpm)
+          if (( ${#rpms[@]} == 0 )); then
+            echo "::notice::no RPMs in the checkout (they are distributed out-of-band); skipping selection tests"
+            exit 0
+          fi
+
+          source lib/pkg_select.sh
+          export SECTOOLS_SKIP_DIGEST=0
+          fail=0
+          for el in 7 8 9 10; do
+            for arch in x86_64 aarch64; do
+              f="$(sectools_select_falcon "$PWD/crowdstrike" "$el" "$arch" 2>/dev/null)" || f=""
+              t="$(sectools_select_tanium "$PWD/tanium" "$el" "$arch" 2>/dev/null)" || t=""
+              if [[ -n "$f" && -n "$t" ]]; then
+                printf '  el%-2s %-8s -> %s | %s\n' "$el" "$arch" "$(basename "$f")" "$(basename "$t")"
+              else
+                printf '  el%-2s %-8s -> no package pair (expected for el7 aarch64)\n' "$el" "$arch"
+              fi
+            done
+          done
+          exit "$fail"
+
+      - name: Every staged RPM must pass digest verification
+        run: |
+          set -Eeuo pipefail
+          shopt -s nullglob
+          rpms=(crowdstrike/*.rpm tanium/*.rpm)
+          if (( ${#rpms[@]} == 0 )); then
+            echo "::notice::no RPMs in the checkout; skipping digest verification"
+            exit 0
+          fi
+          fail=0
+          for f in "${rpms[@]}"; do
+            if rpm -K --nosignature "$f" 2>&1 | grep -qi 'NOT OK'; then
+              echo "::error::corrupt package: $f"
+              fail=1
+            else
+              printf '  digests ok  %s\n' "$(basename "$f")"
+            fi
+          done
+          exit "$fail"
+
+  bundle:
+    name: Bundle build
+    runs-on: ubuntu-latest
+    needs: [manifest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rpm tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq rpm
+
+      - name: Build a bundle and assert it carries no secrets
+        run: |
+          set -Eeuo pipefail
+          shopt -s nullglob
+          rpms=(crowdstrike/*.rpm)
+          if (( ${#rpms[@]} == 0 )); then
+            echo "::notice::no RPMs in the checkout; skipping bundle build"
+            exit 0
+          fi
+
+          SECTOOLS_SKIP_DIGEST=1 ./scripts/stage_bundle.sh \
+            --el 9 --arch x86_64 --tar > /tmp/bundle.tar.gz
+
+          echo "bundle contents:"
+          tar -tzf /tmp/bundle.tar.gz | sed 's|^\./||' | grep -v '^$' | sort | sed 's/^/  /'
+
+          if tar -tzf /tmp/bundle.tar.gz | grep -q 'securitytools\.env'; then
+            echo "::error::bundle contains securitytools.env"
+            exit 1
+          fi
+          echo "bundle carries no secrets"

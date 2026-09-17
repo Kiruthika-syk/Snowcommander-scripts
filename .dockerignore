@@ -1,0 +1,35 @@
+# ==============================================================================
+# Build-context exclusions.
+#
+# Secrets must never be baked into an image layer: image layers are readable by
+# anyone who can pull the image, and deleting a file in a later layer does not
+# remove it from history. Secrets are injected at run time instead.
+#
+# The crowdstrike/ and tanium/ RPM directories are deliberately NOT excluded —
+# the container ships them to targets.
+# ==============================================================================
+securitytools.env
+*.env
+!*.env.example
+.ssh_credentials
+ssh_fleet.env
+secrets/
+*.key
+*.pem
+id_rsa*
+id_ed25519*
+
+inventory
+inventory.*
+!inventory.example
+
+.git
+.gitignore
+*.log
+*.sectools-bak.*
+.deploy-staging/
+
+*.swp
+*.swo
+*~
+.DS_Store

@@ -1,0 +1,49 @@
+# ==============================================================================
+# Secrets — never commit these.
+#
+# securitytools.env holds the Falcon provisioning token, the cmdbsync password,
+# the Azure service-principal secret and the RHSM password. Supply those at
+# deploy time through environment variables or Docker secrets instead;
+# security.sh gives environment values precedence over the file.
+#
+# Use securitytools.env.example as the committed template.
+# ==============================================================================
+securitytools.env
+*.env
+!*.env.example
+.ssh_credentials
+ssh_fleet.env
+secrets/
+*.key
+*.pem
+id_rsa*
+id_ed25519*
+
+# Inventories frequently contain hostnames and usernames
+inventory
+inventory.*
+!inventory.example
+
+# Runtime artefacts
+*.log
+*.sectools-bak.*
+.deploy-staging/
+
+# Vendor binaries — deliberately NOT in git.
+#
+# ~548 MB of RPMs. Individual Falcon sensors run 52-93 MB against GitHub's
+# 100 MB per-file hard limit, and Git LFS bandwidth is punitive at this size.
+# The CI and deploy workflows read them from the self-hosted runner's local
+# disk at /opt/snowcommander-packages instead, and CI skips package-dependent
+# steps when they are absent from a checkout.
+crowdstrike/*.rpm
+tanium/*.rpm
+
+# tanium-init.dat carries Tanium server registration data — treat as sensitive.
+tanium/tanium-init.dat
+
+# Editor / OS noise
+*.swp
+*.swo
+*~
+.DS_Store
