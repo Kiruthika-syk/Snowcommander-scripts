@@ -1,0 +1,22 @@
+# Snow Commander target inventory
+#
+# One hostname or IP per line. Blank lines and # comments are ignored.
+# Copy to a real file (for example ./inventory), which .gitignore excludes.
+#
+# Every host must be:
+#   * an Enterprise Linux derivative - RHEL, CentOS, Rocky, AlmaLinux, Oracle
+#   * EL7, EL8, EL9 or EL10
+#   * x86_64 or aarch64  (note: no EL7 aarch64 Falcon sensor is published)
+#   * reachable over SSH from the control plane
+#   * configured with passwordless sudo for the deployment user
+#
+# Packages are chosen per host from its detected platform, so a mixed-version,
+# mixed-architecture inventory is fine in a single run.
+
+rhel9-np-01.strykercorp.com
+rhel9-np-02.strykercorp.com
+
+# Production - deploy only after a clean plan and verify on non-production
+# rhel9-prod-01.strykercorp.com
+# rhel10-prod-01.strykercorp.com
+# rhel8-prod-07.strykercorp.com

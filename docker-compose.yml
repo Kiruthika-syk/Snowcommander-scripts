@@ -1,0 +1,83 @@
+# ==============================================================================
+# Snow Commander deployment control plane
+#
+#   docker compose run --rm plan
+#   docker compose run --rm verify
+#   docker compose run --rm deploy
+#
+# These are one-shot jobs, not long-running services, so `run --rm` is the
+# normal entry point rather than `up`.
+#
+# Secrets are mounted read-only at run time and are never baked into the image.
+# ==============================================================================
+
+x-common: &common
+  image: snowcommander-deployer:latest
+  build:
+    context: .
+    dockerfile: Dockerfile
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    # Bundles are staged here before transfer; sized for one 88 MB bundle
+    # per concurrent host.
+    - /tmp:size=1g,mode=1777
+    - /home/deployer/.ssh:size=1m,mode=0700,uid=1000,gid=1000
+  environment:
+    SSH_USER: "${SSH_USER:-tpx-admin}"
+    SSH_PORT: "${SSH_PORT:-22}"
+    PARALLEL: "${PARALLEL:-5}"
+    RETRIES: "${RETRIES:-1}"
+    TARGETS: "${TARGETS:-}"
+    INVENTORY: "${INVENTORY:-}"
+    # Non-sensitive configuration
+    FALCON_CID: "${FALCON_CID:-}"
+    CMDBSYNC_UID: "${CMDBSYNC_UID:-2800}"
+    CMDBSYNC_GID: "${CMDBSYNC_GID:-1700}"
+    AZCM_RESOURCE_GROUP: "${AZCM_RESOURCE_GROUP:-}"
+    AZCM_LOCATION: "${AZCM_LOCATION:-eastus2}"
+    AZCM_CLOUD: "${AZCM_CLOUD:-AzureCloud}"
+    AZCM_TAGS: "${AZCM_TAGS:-Environment=Production}"
+    SYSLOG_SERVER1: "${SYSLOG_SERVER1:-10.132.118.100}"
+    SYSLOG_SERVER2: "${SYSLOG_SERVER2:-10.50.118.100}"
+    SYSLOG_PORT: "${SYSLOG_PORT:-514}"
+    # Secrets: supplied by the shell or an --env-file, never committed.
+    FALCON_PROVISIONING_TOKEN: "${FALCON_PROVISIONING_TOKEN:-}"
+    CMDBSYNC_PASSWORD: "${CMDBSYNC_PASSWORD:-}"
+    AZCM_SP_CLIENT_ID: "${AZCM_SP_CLIENT_ID:-}"
+    AZCM_SP_SECRET: "${AZCM_SP_SECRET:-}"
+    AZCM_SUBSCRIPTION_ID: "${AZCM_SUBSCRIPTION_ID:-}"
+    AZCM_TENANT_ID: "${AZCM_TENANT_ID:-}"
+  volumes:
+    - type: bind
+      source: ${SSH_KEY_PATH:-./secrets/ssh_key}
+      target: /run/secrets/ssh_key
+      read_only: true
+    - type: bind
+      source: ${KNOWN_HOSTS_PATH:-./secrets/known_hosts}
+      target: /run/secrets/known_hosts
+      read_only: true
+    - type: bind
+      source: ${INVENTORY_PATH:-./inventory.example}
+      target: /etc/snowcommander/inventory
+      read_only: true
+
+services:
+  plan:
+    <<: *common
+    command: ["plan"]
+
+  verify:
+    <<: *common
+    command: ["verify"]
+
+  deploy:
+    <<: *common
+    command: ["deploy", "${COMPONENTS:-all}"]
+
+  packages:
+    <<: *common
+    command: ["packages"]
