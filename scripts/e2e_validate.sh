@@ -252,8 +252,11 @@ else
     && info "mode: CONVERT (destructive - the template will cease to exist)" \
     || info "mode: clone (template preserved) -> ${VM_NAME}"
 
+  # No --folder filter here. The scope guardrail already confines the search to
+  # SnowCommander/Template(s), and sites differ on singular vs plural, so a
+  # hardcoded 'Templates' silently excluded every FW template.
   provision_args=(--vcenter "$VCENTER" --template "$TEMPLATE" --mode "$MODE"
-                  --ip-timeout "$IP_TIMEOUT" --folder Templates)
+                  --ip-timeout "$IP_TIMEOUT")
   [[ -n "$VM_NAME" ]] && provision_args+=(--name "$VM_NAME")
   [[ -n "$PORTGROUP" ]] && provision_args+=(--portgroup "$PORTGROUP")
   [[ -n "$DATASTORE" ]] && provision_args+=(--datastore "$DATASTORE")
@@ -261,11 +264,18 @@ else
   ((CONFIRM_DESTROY)) && provision_args+=(--i-understand-this-destroys-the-template)
 
   # stdout carries JSON; stderr carries the staged progress log.
-  if ! result_json="$(python3 "${BASE_DIR}/scripts/vsphere_provision.py" "${provision_args[@]}")"; then
-    rc=$?
+  # Capture the status directly: inside `if ! cmd; then`, $? reflects the
+  # negation and always reads 0, which masked the real exit code.
+  rc=0
+  result_json="$(python3 "${BASE_DIR}/scripts/vsphere_provision.py" "${provision_args[@]}")" || rc=$?
+  if ((rc != 0)); then
     case $rc in
-      3) CURRENT_STAGE=1; stage_fail "could not connect to vCenter" ;;
-      4) CURRENT_STAGE=2; stage_fail "template not found" ;;
+      2) CURRENT_STAGE=1; stage_fail "usage error invoking the provisioner (rc=2)" ;;
+      3) CURRENT_STAGE=1; stage_fail "could not connect to vCenter (rc=3)" ;;
+      4) CURRENT_STAGE=2; stage_fail "template '${TEMPLATE}' not found in scope (rc=4)" ;;
+      5) CURRENT_STAGE=3; stage_fail "clone or NIC reconfigure failed (rc=5)" ;;
+      6) CURRENT_STAGE=3; stage_fail "powered on but no IP address appeared (rc=6)" ;;
+      7) CURRENT_STAGE=2; stage_fail "scope violation: outside the permitted folder (rc=7)" ;;
       *) CURRENT_STAGE=3; stage_fail "provisioning failed (rc=${rc})" ;;
     esac
   fi
