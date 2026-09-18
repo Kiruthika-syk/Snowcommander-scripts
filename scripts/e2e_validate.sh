@@ -428,6 +428,13 @@ info "SSH reachable"
 remote_os="$(rsh '. /etc/os-release; printf "%s %s %s" "$ID" "${VERSION_ID%%.*}" "$(uname -m)"' 2>/dev/null || true)"
 info "remote platform: ${remote_os}"
 
+# Reuse this result rather than letting stage_bundle.sh probe again: its own
+# probe uses plain ssh with BatchMode, which cannot authenticate by password.
+read -r r_id r_major r_arch <<<"$remote_os"
+if [[ -z "${r_major:-}" || -z "${r_arch:-}" ]]; then
+  stage_fail "could not determine the remote platform (got '${remote_os}')"
+fi
+
 # --- remove superseded payloads baked into the template -----------------------
 if ((PURGE_LEGACY)); then
   echo
@@ -471,8 +478,9 @@ info "building a bundle matched to this host"
 bundle="$(mktemp --suffix=.tar.gz)"
 trap 'rm -f "$bundle"' EXIT
 
-if ! SSH_USER="$TARGET_SSH_USER" "${BASE_DIR}/scripts/stage_bundle.sh" \
-      --probe "${TARGET_SSH_USER}@${TARGET_HOST}" --tar >"$bundle" 2>/tmp/e2e_stage.err; then
+info "building for el${r_major} ${r_arch}"
+if ! "${BASE_DIR}/scripts/stage_bundle.sh" \
+      --el "$r_major" --arch "$r_arch" --tar >"$bundle" 2>/tmp/e2e_stage.err; then
   sed 's/^/    /' /tmp/e2e_stage.err
   stage_fail "bundle staging failed - see the error above"
 fi

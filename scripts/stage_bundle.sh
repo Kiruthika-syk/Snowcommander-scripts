@@ -58,9 +58,22 @@ done
 # Probe a live target over SSH when EL/arch were not supplied.
 if [[ -n "$PROBE" ]]; then
   log "probing ${PROBE} for platform details"
-  probe_out="$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$PROBE" \
+  # Support password auth when SSHPASS is set. BatchMode must be omitted in
+  # that case, because it suppresses the prompt sshpass needs to answer.
+  probe_ssh=(ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new
+             -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+  probe_wrap=()
+  if [[ -n "${SSHPASS:-}" ]] && command -v sshpass >/dev/null 2>&1; then
+    probe_wrap=(sshpass -e)
+    probe_ssh+=(-o PubkeyAuthentication=no -o PreferredAuthentications=password)
+  else
+    probe_ssh+=(-o BatchMode=yes)
+  fi
+
+  probe_out="$("${probe_wrap[@]}" "${probe_ssh[@]}" "$PROBE" \
     '. /etc/os-release; printf "%s %s %s\n" "${ID}" "${VERSION_ID%%.*}" "$(uname -m)"' 2>/dev/null)" || {
     err "cannot reach ${PROBE} over SSH"
+    err "  set SSHPASS for password auth, or use --el/--arch to skip probing"
     exit "$SECTOOLS_RC_USAGE"
   }
   read -r probe_id probe_major probe_arch <<<"$probe_out"
