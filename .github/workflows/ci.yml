@@ -116,7 +116,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           fail=0
-          for key in FALCON_PROVISIONING_TOKEN CMDBSYNC_PASSWORD AZCM_SP_SECRET RHSM_PASSWORD; do
+          for key in CMDBSYNC_PASSWORD AZCM_SP_SECRET RHSM_PASSWORD; do
             value="$(grep -E "^${key}=" securitytools.env.example 2>/dev/null | cut -d= -f2- || true)"
             if [[ -n "$value" && "$value" != "REPLACE_ME" ]]; then
               echo "::error::securitytools.env.example has a non-placeholder value for ${key}"

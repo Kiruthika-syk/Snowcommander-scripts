@@ -45,7 +45,8 @@ optional  install_sentinel.sh
 optional  install_syslog.sh
 
 # --- Red Hat Subscription Manager registration --------------------------------
-# Note: sub-reg.sh hardcodes rhel-9-for-x86_64-* repository names and will
-# mis-register el7/el8/el10 hosts. Shipped for parity with the existing
-# workflow, but do not run it on non-el9 targets until it is parameterised.
-optional  sub-reg.sh
+# Repository names are now derived from the detected RHEL major version and
+# architecture, so EL7/8/9/10 all register correctly. Supports register,
+# unregister and status: appliance templates register only long enough to
+# install and are then unregistered again.
+required  sub-reg.sh

@@ -33,6 +33,7 @@ import argparse
 import atexit
 import json
 import os
+import re
 import ssl
 import sys
 import time
@@ -41,6 +42,33 @@ from pyVim import connect
 from pyVmomi import vim
 
 RC_OK, RC_USAGE, RC_CONNECT, RC_NOTFOUND, RC_CLONE, RC_POWER = 0, 2, 3, 4, 5, 6
+RC_SCOPE = 7
+
+# ----------------------------------------------------------------------------
+# Hard scope guardrail.
+#
+# This tool may only ever touch objects inside the SnowCommander/Templates
+# folder. Anything outside it is refused before a single API call that could
+# modify state. The regex tolerates the "SnowComander" spelling that exists in
+# the BLR inventory as well as the correctly spelled variant.
+# ----------------------------------------------------------------------------
+ALLOWED_FOLDER_RE = re.compile(r"snowcom+ander/templates", re.IGNORECASE)
+ALLOWED_FOLDER_LABEL = "SnowCommander/Templates"
+
+
+def normalise_path(path: str) -> str:
+    """Lowercase and strip separators so folder spellings compare reliably."""
+    return re.sub(r"[\s_\-]+", "", path).lower()
+
+
+def enforce_scope(obj, path: str) -> None:
+    """Refuse to act on anything outside SnowCommander/Templates."""
+    if not ALLOWED_FOLDER_RE.search(normalise_path(path)):
+        fail(RC_SCOPE,
+             f"SCOPE VIOLATION: '{obj.name}' lives in '{path or '<root>'}', "
+             f"outside {ALLOWED_FOLDER_LABEL}. This tool is restricted to that "
+             f"folder and will not touch any other object.")
+    log("SCOPE", f"'{obj.name}' is inside {path} - within the permitted scope")
 
 
 def log(stage: str, msg: str) -> None:
@@ -99,13 +127,17 @@ def folder_path(obj) -> str:
 # Stage 2 - find the template
 # ----------------------------------------------------------------------------
 def list_templates(content, folder_filter: str | None) -> None:
-    log("2/8 TEMPLATE", "enumerating templates")
+    """Only ever lists templates inside the permitted folder."""
+    log("2/8 TEMPLATE", f"enumerating templates within {ALLOWED_FOLDER_LABEL}")
     rows = []
     for vm in get_all(content, vim.VirtualMachine):
         try:
             if not (vm.config and vm.config.template):
                 continue
             path = folder_path(vm)
+            # Scope filter, not a convenience filter: everything else is hidden.
+            if not ALLOWED_FOLDER_RE.search(normalise_path(path)):
+                continue
             if folder_filter and folder_filter.lower() not in path.lower():
                 continue
             rows.append((vm.name, vm.config.guestFullName or "unknown", path))
@@ -113,7 +145,8 @@ def list_templates(content, folder_filter: str | None) -> None:
             continue
 
     if not rows:
-        log("2/8 TEMPLATE", "no templates matched")
+        log("2/8 TEMPLATE",
+            f"no templates found inside {ALLOWED_FOLDER_LABEL}")
         return
 
     print(f"{'TEMPLATE':<34} {'GUEST OS':<44} FOLDER", file=sys.stderr)
@@ -137,14 +170,18 @@ def find_template(content, name: str, folder_filter: str | None):
 
     if not matches:
         fail(RC_NOTFOUND,
-             f"template '{name}' not found; run --list-templates to see what exists")
+             f"template '{name}' not found inside {ALLOWED_FOLDER_LABEL}; "
+             f"run --list-templates to see what exists there")
     if len(matches) > 1:
         fail(RC_NOTFOUND,
              f"'{name}' is ambiguous ({len(matches)} matches); narrow it with --folder")
 
     vm = matches[0]
+    path = folder_path(vm)
+    # Final gate before anything mutating can be attempted.
+    enforce_scope(vm, path)
     log("2/8 TEMPLATE",
-        f"found: {vm.name} | guest={vm.config.guestFullName} | folder={folder_path(vm)}")
+        f"found: {vm.name} | guest={vm.config.guestFullName} | folder={path}")
     return vm
 
 

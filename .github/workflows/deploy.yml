@@ -73,7 +73,6 @@ jobs:
 
       - name: Mask secrets in all log output
         env:
-          FALCON_PROVISIONING_TOKEN: ${{ secrets.FALCON_PROVISIONING_TOKEN }}
           CMDBSYNC_PASSWORD: ${{ secrets.CMDBSYNC_PASSWORD }}
           AZCM_SP_SECRET: ${{ secrets.AZCM_SP_SECRET }}
           RHSM_PASSWORD: ${{ secrets.RHSM_PASSWORD }}
@@ -81,7 +80,7 @@ jobs:
           set -Eeuo pipefail
           # Actions masks repository secrets automatically; re-registering also
           # covers values that pass through sub-processes.
-          for v in FALCON_PROVISIONING_TOKEN CMDBSYNC_PASSWORD AZCM_SP_SECRET RHSM_PASSWORD; do
+          for v in CMDBSYNC_PASSWORD AZCM_SP_SECRET RHSM_PASSWORD; do
             value="${!v:-}"
             [[ -n "$value" ]] && echo "::add-mask::$value"
           done
@@ -173,7 +172,6 @@ jobs:
           MODE: ${{ inputs.mode }}
           KEEP_GOING: ${{ inputs.keep_going }}
           FALCON_CID: ${{ vars.FALCON_CID }}
-          FALCON_PROVISIONING_TOKEN: ${{ secrets.FALCON_PROVISIONING_TOKEN }}
           CMDBSYNC_PASSWORD: ${{ secrets.CMDBSYNC_PASSWORD }}
           CMDBSYNC_UID: ${{ vars.CMDBSYNC_UID }}
           CMDBSYNC_GID: ${{ vars.CMDBSYNC_GID }}
@@ -202,7 +200,6 @@ jobs:
           trap 'shred -u "$ENVFILE" 2>/dev/null || rm -f "$ENVFILE"' EXIT
           {
             printf 'FALCON_CID=%s\n'                "${FALCON_CID:-}"
-            printf 'FALCON_PROVISIONING_TOKEN=%s\n' "${FALCON_PROVISIONING_TOKEN:-}"
             printf 'CMDBSYNC_PASSWORD=%s\n'         "${CMDBSYNC_PASSWORD:-}"
             printf 'CMDBSYNC_UID=%s\n'              "${CMDBSYNC_UID:-2800}"
             printf 'CMDBSYNC_GID=%s\n'              "${CMDBSYNC_GID:-1700}"

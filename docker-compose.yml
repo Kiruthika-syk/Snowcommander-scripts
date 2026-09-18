@@ -45,7 +45,6 @@ x-common: &common
     SYSLOG_SERVER2: "${SYSLOG_SERVER2:-10.50.118.100}"
     SYSLOG_PORT: "${SYSLOG_PORT:-514}"
     # Secrets: supplied by the shell or an --env-file, never committed.
-    FALCON_PROVISIONING_TOKEN: "${FALCON_PROVISIONING_TOKEN:-}"
     CMDBSYNC_PASSWORD: "${CMDBSYNC_PASSWORD:-}"
     AZCM_SP_CLIENT_ID: "${AZCM_SP_CLIENT_ID:-}"
     AZCM_SP_SECRET: "${AZCM_SP_SECRET:-}"

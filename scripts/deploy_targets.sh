@@ -12,8 +12,8 @@
 #   scripts/deploy_targets.sh --inventory /etc/inventory --mode deploy --components all
 #   scripts/deploy_targets.sh --inventory /etc/inventory --mode verify --parallel 10
 #
-# Secrets come from the environment (FALCON_CID, FALCON_PROVISIONING_TOKEN,
-# CMDBSYNC_PASSWORD, AZCM_*, ...). They are rendered once to a 0600 file,
+# Secrets come from the environment (FALCON_CID, CMDBSYNC_PASSWORD, AZCM_*,
+# ...). They are rendered once to a 0600 file,
 # pushed to each target on a separate SSH channel, and shredded afterwards.
 # They are never placed on a command line, so `ps` cannot reveal them.
 #
@@ -126,7 +126,7 @@ chmod 600 "$ENVFILE"
 
 {
   printf 'FALCON_CID=%s\n' "${FALCON_CID:-}"
-  printf 'FALCON_PROVISIONING_TOKEN=%s\n' "${FALCON_PROVISIONING_TOKEN:-}"
+  # No provisioning token: this tenant does not require one.
   printf 'CMDBSYNC_PASSWORD=%s\n' "${CMDBSYNC_PASSWORD:-}"
   printf 'CMDBSYNC_UID=%s\n' "${CMDBSYNC_UID:-2800}"
   printf 'CMDBSYNC_GID=%s\n' "${CMDBSYNC_GID:-1700}"

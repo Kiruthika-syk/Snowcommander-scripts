@@ -24,7 +24,7 @@
 #   TARGET_SSH_USER                     login on the new VM (default tpx-admin)
 #   SSHPASS                             target password (if no key)
 #   TARGET_SSH_KEY                      private key path (preferred over SSHPASS)
-#   FALCON_CID, FALCON_PROVISIONING_TOKEN, CMDBSYNC_PASSWORD, AZCM_*, ...
+#   FALCON_CID, CMDBSYNC_PASSWORD, AZCM_*, RHSM_USERNAME, RHSM_PASSWORD
 #
 # Usage:
 #   scripts/e2e_validate.sh --vcenter blr-vsphere-01.strykercorp.com \
@@ -56,6 +56,15 @@ KEEP_TOOLS=0
 KEEP_VM=0
 IP_TIMEOUT=300
 COMPONENTS=all
+
+# RHSM handling:
+#   auto    infer from the template/guest - Red Hat templates keep the
+#           subscription, GI/Vocera appliance templates are unregistered again
+#   keep    register and leave the host registered
+#   remove  register for the install, then unregister before finishing
+#   skip    do not touch subscription-manager at all
+RHSM_MODE=auto
+RHSM_APPLIED=0
 
 TARGET_SSH_USER="${TARGET_SSH_USER:-tpx-admin}"
 TARGET_SSH_KEY="${TARGET_SSH_KEY:-}"
@@ -121,6 +130,7 @@ while [[ $# -gt 0 ]]; do
     --components) COMPONENTS="${2:?}"; shift 2 ;;
     --keep-tools) KEEP_TOOLS=1; shift ;;
     --keep-vm) KEEP_VM=1; shift ;;
+    --rhsm-mode) RHSM_MODE="${2:?}"; shift 2 ;;
     --ip-timeout) IP_TIMEOUT="${2:?}"; shift 2 ;;
     --user) TARGET_SSH_USER="${2:?}"; shift 2 ;;
     --key) TARGET_SSH_KEY="${2:?}"; shift 2 ;;
@@ -302,7 +312,7 @@ envfile="$(mktemp)"
 chmod 600 "$envfile"
 {
   printf 'FALCON_CID=%s\n' "${FALCON_CID:-}"
-  printf 'FALCON_PROVISIONING_TOKEN=%s\n' "${FALCON_PROVISIONING_TOKEN:-}"
+  # No provisioning token: this tenant does not require one.
   printf 'CMDBSYNC_PASSWORD=%s\n' "${CMDBSYNC_PASSWORD:-}"
   printf 'CMDBSYNC_UID=%s\n' "${CMDBSYNC_UID:-2800}"
   printf 'CMDBSYNC_GID=%s\n' "${CMDBSYNC_GID:-1700}"
@@ -317,6 +327,8 @@ chmod 600 "$envfile"
   printf 'SYSLOG_SERVER1=%s\n' "${SYSLOG_SERVER1:-10.132.118.100}"
   printf 'SYSLOG_SERVER2=%s\n' "${SYSLOG_SERVER2:-10.50.118.100}"
   printf 'SYSLOG_PORT=%s\n' "${SYSLOG_PORT:-514}"
+  [[ -n "${RHSM_USERNAME:-}" ]] && printf 'RHSM_USERNAME=%s\n' "$RHSM_USERNAME"
+  [[ -n "${RHSM_PASSWORD:-}" ]] && printf 'RHSM_PASSWORD=%s\n' "$RHSM_PASSWORD"
 } >"$envfile"
 rsh "umask 077; cat > ${REMOTE_DIR}/securitytools.env" <"$envfile"
 shred -u "$envfile" 2>/dev/null || rm -f "$envfile"
@@ -328,6 +340,49 @@ stage_pass "${placed} files placed in ${REMOTE_DIR}"
 # Stage 5 - install
 # ==============================================================================
 stage_begin 5 "INSTALL THE SECURITY TOOLS"
+
+# --- Red Hat subscription -----------------------------------------------------
+# rsyslog is installed from Red Hat repositories, so an unregistered RHEL host
+# cannot complete the syslog component. Register first, and for appliance
+# templates give the entitlement back afterwards.
+resolve_rhsm_mode() {
+  if [[ "$RHSM_MODE" != "auto" ]]; then
+    printf '%s' "$RHSM_MODE"
+    return
+  fi
+  # Red Hat base templates keep their subscription; GI/Vocera appliances do not.
+  local hint="${TEMPLATE:-$EXISTING_HOST}"
+  shopt -s nocasematch
+  if [[ "$hint" == *redhat* ]]; then
+    printf 'keep'
+  elif [[ "$hint" == *gi* || "$hint" == *engage* || "$hint" == *vocera* ]]; then
+    printf 'remove'
+  else
+    printf 'skip'
+  fi
+  shopt -u nocasematch
+}
+
+RHSM_EFFECTIVE="$(resolve_rhsm_mode)"
+info "RHSM mode: ${RHSM_MODE} -> effective '${RHSM_EFFECTIVE}'"
+
+if [[ "$RHSM_EFFECTIVE" != "skip" ]]; then
+  if [[ -z "${RHSM_USERNAME:-}" || -z "${RHSM_PASSWORD:-}" ]]; then
+    info "WARNING: RHSM_USERNAME/RHSM_PASSWORD unset; skipping registration"
+    info "         the syslog component may fail without Red Hat repositories"
+  else
+    info "registering with Red Hat (repositories are chosen per RHEL version)"
+    if rsudo "RHSM_USERNAME='${RHSM_USERNAME}' RHSM_PASSWORD='${RHSM_PASSWORD}' ${REMOTE_DIR}/sub-reg.sh register" 2>&1 \
+        | sed 's/^/    /'; then
+      RHSM_APPLIED=1
+      info "subscription active"
+    else
+      info "WARNING: registration failed; continuing (syslog may fail)"
+    fi
+  fi
+fi
+
+echo
 info "running: sudo ${REMOTE_DIR}/security.sh ${COMPONENTS}"
 echo
 
@@ -368,6 +423,19 @@ if [[ "$active_count" -gt 0 ]]; then
   stage_pass "${active_count} security service(s) active"
 else
   stage_fail "no security services are active after installation"
+fi
+
+# Verification has happened, so an appliance template can hand its entitlement
+# back now. Red Hat templates intentionally stay registered.
+if [[ "$RHSM_EFFECTIVE" == "remove" && "$RHSM_APPLIED" == "1" ]]; then
+  echo
+  info "appliance template: unregistering from Red Hat now that verification is done"
+  rsudo "${REMOTE_DIR}/sub-reg.sh unregister" 2>&1 | sed 's/^/    /' \
+    || info "WARNING: unregister reported a problem - check manually"
+  rsudo "${REMOTE_DIR}/sub-reg.sh status" 2>&1 | sed 's/^/    /' || true
+elif [[ "$RHSM_EFFECTIVE" == "keep" && "$RHSM_APPLIED" == "1" ]]; then
+  echo
+  info "Red Hat template: leaving the subscription registered by design"
 fi
 
 # ==============================================================================
