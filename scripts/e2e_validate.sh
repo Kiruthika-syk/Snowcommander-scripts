@@ -55,11 +55,14 @@ BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Where the scripts live on the target.
 #
-# /opt is the default rather than /var/tmp because these survive into a golden
-# image: systemd-tmpfiles cleans /var/tmp on a schedule (30 days on RHEL), so
-# scripts placed there would silently disappear from a template that sits
-# unused. Override with --remote-dir.
-REMOTE_DIR="${REMOTE_DIR:-/opt/snowcommander}"
+# This is the same path the templates already use, so operators find the
+# scripts where they expect. It also sits in the deployment user's home, which
+# means the transfer needs no privilege escalation, and unlike /var/tmp it is
+# never swept by systemd-tmpfiles.
+#
+# The stale contents at this path are removed first (see the legacy purge in
+# stage 4), then the current bundle is written in its place.
+REMOTE_DIR="${REMOTE_DIR:-/home/tpx-admin/2026snowcommander}"
 
 VCENTER=""
 TEMPLATE=""
@@ -492,10 +495,23 @@ if ! "${BASE_DIR}/scripts/stage_bundle.sh" \
 fi
 info "bundle: $(du -h "$bundle" | cut -f1)"
 
-rsh "rm -rf ${REMOTE_DIR} && mkdir -p ${REMOTE_DIR}" 2>/dev/null \
+# Use sudo only when the parent directory is not writable by the login user,
+# so a home-directory path stays unprivileged while /opt still works.
+if rsh "test -w \"\$(dirname ${REMOTE_DIR})\"" 2>/dev/null; then
+  place() { rsh "$@"; }
+  info "placing as ${TARGET_SSH_USER} (no privilege escalation needed)"
+else
+  place() { rsudo "$@"; }
+  info "placing with sudo (${REMOTE_DIR} is outside the user's writable tree)"
+fi
+
+info "replacing ${REMOTE_DIR} with the current bundle"
+place "rm -rf ${REMOTE_DIR} && mkdir -p ${REMOTE_DIR}" 2>/dev/null \
   || stage_fail "cannot create ${REMOTE_DIR} on the target"
-rsh "tar -C ${REMOTE_DIR} -xzf -" <"$bundle" \
+place "tar -C ${REMOTE_DIR} -xzf -" <"$bundle" \
   || stage_fail "failed to extract the bundle on the target"
+# Keep the tree owned by the deployment user when it lives in their home.
+place "chown -R ${TARGET_SSH_USER}: ${REMOTE_DIR} 2>/dev/null || true" 2>/dev/null || true
 
 placed="$(rsh "find ${REMOTE_DIR} -type f | wc -l" 2>/dev/null || echo 0)"
 info "files placed: ${placed}"
