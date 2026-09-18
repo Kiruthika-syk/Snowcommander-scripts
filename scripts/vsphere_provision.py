@@ -39,7 +39,7 @@ import sys
 import time
 
 from pyVim import connect
-from pyVmomi import vim
+from pyVmomi import vim, vmodl
 
 RC_OK, RC_USAGE, RC_CONNECT, RC_NOTFOUND, RC_CLONE, RC_POWER = 0, 2, 3, 4, 5, 6
 RC_SCOPE = 7
@@ -106,12 +106,70 @@ def connect_vcenter(host: str, user: str, password: str, insecure: bool):
     return si
 
 
-def get_all(content, vimtype):
-    view = content.viewManager.CreateContainerView(content.rootFolder, [vimtype], True)
+def get_all(content, vimtype, container=None):
+    view = content.viewManager.CreateContainerView(
+        container or content.rootFolder, [vimtype], True)
     try:
         return list(view.view)
     finally:
         view.Destroy()
+
+
+def bulk_fetch(content, container, vimtype, paths):
+    """Retrieve properties for every object of a type in ONE round trip.
+
+    Touching vm.config.template in a loop makes pyVmomi issue a separate SOAP
+    call per VM, which takes many minutes on a large vCenter. PropertyCollector
+    returns everything at once instead.
+
+    Returns [(managed_object, {path: value}), ...].
+    """
+    view = content.viewManager.CreateContainerView(container, [vimtype], True)
+    try:
+        traversal = vmodl.query.PropertyCollector.TraversalSpec(
+            name="toView", path="view", skip=False, type=vim.view.ContainerView)
+        obj_spec = vmodl.query.PropertyCollector.ObjectSpec(
+            obj=view, skip=True, selectSet=[traversal])
+        prop_spec = vmodl.query.PropertyCollector.PropertySpec(
+            type=vimtype, pathSet=list(paths), all=False)
+        filter_spec = vmodl.query.PropertyCollector.FilterSpec(
+            objectSet=[obj_spec], propSet=[prop_spec])
+
+        results = []
+        for obj in content.propertyCollector.RetrieveContents([filter_spec]) or []:
+            props = {p.name: p.val for p in (obj.propSet or [])}
+            results.append((obj.obj, props))
+        return results
+    finally:
+        view.Destroy()
+
+
+def find_templates_folder(content):
+    """Locate the SnowCommander/Templates folder.
+
+    Scoping the search to this folder is what keeps enumeration fast: only its
+    children are inspected instead of every VM in the vCenter. Folders are few,
+    so walking them is cheap.
+    """
+    log("2/8 TEMPLATE", f"locating the {ALLOWED_FOLDER_LABEL} folder")
+    candidates = []
+    for folder, props in bulk_fetch(content, content.rootFolder, vim.Folder, ["name"]):
+        if normalise_path(props.get("name", "")) != "templates":
+            continue
+        path = folder_path(folder)
+        full = f"{path}/{props.get('name')}" if path else props.get("name", "")
+        if ALLOWED_FOLDER_RE.search(normalise_path(full)):
+            candidates.append((folder, full))
+
+    if not candidates:
+        log("2/8 TEMPLATE",
+            f"no {ALLOWED_FOLDER_LABEL} folder found; falling back to a full scan")
+        return None, None
+    if len(candidates) > 1:
+        log("2/8 TEMPLATE",
+            f"{len(candidates)} matching folders found; using the first: {candidates[0][1]}")
+    log("2/8 TEMPLATE", f"folder located: {candidates[0][1]}")
+    return candidates[0]
 
 
 def folder_path(obj) -> str:
@@ -126,47 +184,69 @@ def folder_path(obj) -> str:
 # ----------------------------------------------------------------------------
 # Stage 2 - find the template
 # ----------------------------------------------------------------------------
+def scan_templates(content):
+    """Return [(vm, name, guest_os, folder_path)] for templates in scope.
+
+    Scoped to the Templates folder and fetched with a single PropertyCollector
+    call, so this completes in seconds rather than minutes.
+    """
+    folder, folder_full = find_templates_folder(content)
+    container = folder or content.rootFolder
+    if folder is None:
+        log("2/8 TEMPLATE",
+            "scanning all VMs - slower; the folder could not be located")
+
+    log("2/8 TEMPLATE", "fetching template properties in a single request")
+    found = bulk_fetch(content, container, vim.VirtualMachine,
+                       ["name", "config.template", "config.guestFullName"])
+    log("2/8 TEMPLATE", f"inspected {len(found)} virtual machine(s)")
+
+    rows = []
+    for vm, props in found:
+        if not props.get("config.template"):
+            continue
+        # When scoped to the folder its path is already known, so there is no
+        # need to walk each VM's parent chain.
+        path = folder_full if folder is not None else folder_path(vm)
+        if not ALLOWED_FOLDER_RE.search(normalise_path(path or "")):
+            continue
+        rows.append((vm, props.get("name", "?"),
+                     props.get("config.guestFullName") or "unknown", path))
+    return rows
+
+
 def list_templates(content, folder_filter: str | None) -> None:
     """Only ever lists templates inside the permitted folder."""
-    log("2/8 TEMPLATE", f"enumerating templates within {ALLOWED_FOLDER_LABEL}")
-    rows = []
-    for vm in get_all(content, vim.VirtualMachine):
-        try:
-            if not (vm.config and vm.config.template):
-                continue
-            path = folder_path(vm)
-            # Scope filter, not a convenience filter: everything else is hidden.
-            if not ALLOWED_FOLDER_RE.search(normalise_path(path)):
-                continue
-            if folder_filter and folder_filter.lower() not in path.lower():
-                continue
-            rows.append((vm.name, vm.config.guestFullName or "unknown", path))
-        except Exception:  # noqa: BLE001
-            continue
+    rows = scan_templates(content)
+    if folder_filter:
+        rows = [r for r in rows if folder_filter.lower() in (r[3] or "").lower()]
 
     if not rows:
-        log("2/8 TEMPLATE",
-            f"no templates found inside {ALLOWED_FOLDER_LABEL}")
+        log("2/8 TEMPLATE", f"no templates found inside {ALLOWED_FOLDER_LABEL}")
         return
 
     print(f"{'TEMPLATE':<34} {'GUEST OS':<44} FOLDER", file=sys.stderr)
     print("-" * 110, file=sys.stderr)
-    for name, guest, path in sorted(rows):
+    for _vm, name, guest, path in sorted(rows, key=lambda r: r[1]):
         print(f"{name:<34} {guest:<44} {path}", file=sys.stderr)
-    log("2/8 TEMPLATE", f"{len(rows)} template(s)")
+    log("2/8 TEMPLATE", f"{len(rows)} template(s) in scope")
 
 
 def find_template(content, name: str, folder_filter: str | None):
     log("2/8 TEMPLATE", f"searching for template '{name}'")
-    matches = []
-    for vm in get_all(content, vim.VirtualMachine):
-        if vm.name != name:
-            continue
-        if not (vm.config and vm.config.template):
-            fail(RC_NOTFOUND, f"'{name}' exists but is a VM, not a template")
-        if folder_filter and folder_filter.lower() not in folder_path(vm).lower():
-            continue
-        matches.append(vm)
+    rows = scan_templates(content)
+
+    if not any(r[1] == name for r in rows):
+        # Distinguish "not a template" from "not present" for a clearer error.
+        for vm, props in bulk_fetch(content, content.rootFolder,
+                                    vim.VirtualMachine, ["name", "config.template"]):
+            if props.get("name") == name and not props.get("config.template"):
+                fail(RC_NOTFOUND, f"'{name}' exists but is a VM, not a template")
+
+    matches = [r[0] for r in rows
+               if r[1] == name
+               and (not folder_filter
+                    or folder_filter.lower() in (r[3] or "").lower())]
 
     if not matches:
         fail(RC_NOTFOUND,
@@ -371,7 +451,9 @@ def main() -> int:
     else:
         if not args.name:
             fail(RC_USAGE, "--name is required in clone mode")
-        if any(v.name == args.name for v in get_all(content, vim.VirtualMachine)):
+        # Bulk fetch: reading .name per VM would be one round trip each.
+        existing = bulk_fetch(content, content.rootFolder, vim.VirtualMachine, ["name"])
+        if any(p.get("name") == args.name for _o, p in existing):
             fail(RC_CLONE, f"a VM named '{args.name}' already exists; pick another --name")
         vm = clone_template(content, template, args.name, args.datastore,
                             None, args.resource_pool, args.portgroup)
