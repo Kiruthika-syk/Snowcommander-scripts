@@ -52,8 +52,15 @@ RC_SCOPE = 7
 # modify state. The regex tolerates the "SnowComander" spelling that exists in
 # the BLR inventory as well as the correctly spelled variant.
 # ----------------------------------------------------------------------------
-ALLOWED_FOLDER_RE = re.compile(r"snowcom+ander/templates", re.IGNORECASE)
-ALLOWED_FOLDER_LABEL = "SnowCommander/Templates"
+# Folder naming differs between sites, so the pattern tolerates both observed
+# variants rather than forcing the inventory to be renamed:
+#   BLR  SnowComander/Templates   (one 'm', plural)
+#   FW   SnowCommander/Template   (two 'm', singular)
+# Override with SNOWCOMMANDER_FOLDER_RE if a site uses a different convention.
+ALLOWED_FOLDER_RE = re.compile(
+    os.environ.get("SNOWCOMMANDER_FOLDER_RE", r"snowcom+ander/templates?"),
+    re.IGNORECASE)
+ALLOWED_FOLDER_LABEL = "SnowCommander/Template(s)"
 
 
 def normalise_path(path: str) -> str:
@@ -154,7 +161,8 @@ def find_templates_folder(content):
     log("2/8 TEMPLATE", f"locating the {ALLOWED_FOLDER_LABEL} folder")
     candidates = []
     for folder, props in bulk_fetch(content, content.rootFolder, vim.Folder, ["name"]):
-        if normalise_path(props.get("name", "")) != "templates":
+        # Accept both 'Template' and 'Templates'.
+        if normalise_path(props.get("name", "")) not in ("template", "templates"):
             continue
         path = folder_path(folder)
         full = f"{path}/{props.get('name')}" if path else props.get("name", "")
@@ -162,9 +170,14 @@ def find_templates_folder(content):
             candidates.append((folder, full))
 
     if not candidates:
-        log("2/8 TEMPLATE",
-            f"no {ALLOWED_FOLDER_LABEL} folder found; falling back to a full scan")
-        return None, None
+        # Do not silently fall back to scanning every VM: on a populated
+        # vCenter that takes many minutes and still finds nothing useful.
+        log("2/8 TEMPLATE", f"no folder matching {ALLOWED_FOLDER_LABEL} was found")
+        log("2/8 TEMPLATE", "run with --list-folders to see the actual inventory layout")
+        fail(RC_NOTFOUND,
+             f"cannot locate a folder matching '{ALLOWED_FOLDER_RE.pattern}'. "
+             f"Use --list-folders to inspect the hierarchy, or set "
+             f"SNOWCOMMANDER_FOLDER_RE to match this site's naming.")
     if len(candidates) > 1:
         log("2/8 TEMPLATE",
             f"{len(candidates)} matching folders found; using the first: {candidates[0][1]}")
@@ -184,6 +197,41 @@ def folder_path(obj) -> str:
 # ----------------------------------------------------------------------------
 # Stage 2 - find the template
 # ----------------------------------------------------------------------------
+def list_folders(content, needle: str | None = None) -> None:
+    """Print the VM folder hierarchy, to discover the real layout.
+
+    Read-only and unscoped on purpose: you cannot correct a folder pattern
+    without first seeing what the site actually calls things.
+    """
+    log("FOLDERS", "enumerating the VM folder hierarchy")
+    rows = []
+    for folder, props in bulk_fetch(content, content.rootFolder, vim.Folder, ["name"]):
+        name = props.get("name", "?")
+        parent = folder_path(folder)
+        full = f"{parent}/{name}" if parent else name
+        if needle and needle.lower() not in full.lower():
+            continue
+        rows.append(full)
+
+    if not rows:
+        log("FOLDERS", "no folders matched")
+        return
+
+    marker_shown = False
+    print(f"\n{'FOLDER PATH':<70} IN SCOPE", file=sys.stderr)
+    print("-" * 82, file=sys.stderr)
+    for path in sorted(set(rows)):
+        in_scope = bool(ALLOWED_FOLDER_RE.search(normalise_path(path)))
+        if in_scope:
+            marker_shown = True
+        print(f"{path:<70} {'YES' if in_scope else ''}", file=sys.stderr)
+    log("FOLDERS", f"{len(set(rows))} folder(s)")
+    if not marker_shown:
+        log("FOLDERS",
+            f"WARNING: nothing matches '{ALLOWED_FOLDER_RE.pattern}' - "
+            f"set SNOWCOMMANDER_FOLDER_RE to match one of the paths above")
+
+
 def scan_templates(content):
     """Return [(vm, name, guest_os, folder_path)] for templates in scope.
 
@@ -408,6 +456,8 @@ def main() -> int:
     p.add_argument("--datastore")
     p.add_argument("--resource-pool")
     p.add_argument("--list-templates", action="store_true")
+    p.add_argument("--list-folders", action="store_true",
+                   help="print the VM folder hierarchy to discover the real layout")
     p.add_argument("--insecure", action="store_true",
                    help="skip TLS verification (common for internal vCenters)")
     p.add_argument("--ip-timeout", type=int, default=300)
@@ -431,6 +481,10 @@ def main() -> int:
 
     si = connect_vcenter(args.vcenter, user, password, args.insecure)
     content = si.content
+
+    if args.list_folders:
+        list_folders(content, args.folder)
+        return RC_OK
 
     if args.list_templates:
         list_templates(content, args.folder)
