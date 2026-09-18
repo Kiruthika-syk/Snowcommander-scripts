@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snow Commander — Security Tools Deployment</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#161920; --panel2:#1b1f27; --line:#272c36;
+    --fg:#e6e8ec; --dim:#9aa3b2; --faint:#6b7488;
+    --accent:#4da3ff; --ok:#3fb950; --warn:#d29922; --bad:#f85149;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{font-family:var(--mono);font-size:.88em;background:var(--panel2);
+       padding:.12em .38em;border-radius:3px;color:#c9d3e0}
+  pre{font-family:var(--mono);font-size:13px;line-height:1.6;background:#0b0d11;
+      border:1px solid var(--line);border-radius:6px;padding:14px 16px;overflow-x:auto;margin:14px 0}
+  pre code{background:none;padding:0;color:#d6dde8}
+  .cmt{color:var(--faint)}
+  .str{color:#8ddb8c}
+  .kw{color:var(--accent)}
+
+  /* layout */
+  .wrap{display:flex;min-height:100vh}
+  nav{width:250px;flex:0 0 250px;background:var(--panel);border-right:1px solid var(--line);
+      position:sticky;top:0;height:100vh;overflow-y:auto;padding:22px 0}
+  nav .brand{padding:0 20px 16px;border-bottom:1px solid var(--line);margin-bottom:12px}
+  nav .brand b{display:block;font-size:15px;letter-spacing:-.2px}
+  nav .brand span{font-size:12px;color:var(--faint)}
+  nav a{display:block;padding:6px 20px;color:var(--dim);font-size:13.5px;border-left:2px solid transparent}
+  nav a:hover{color:var(--fg);background:var(--panel2);text-decoration:none}
+  nav a.on{color:var(--accent);border-left-color:var(--accent);background:var(--panel2)}
+  nav .grp{padding:14px 20px 5px;font-size:10.5px;letter-spacing:.09em;
+           text-transform:uppercase;color:var(--faint)}
+  main{flex:1;min-width:0;padding:44px 52px 120px;max-width:1080px}
+
+  h1{font-size:30px;margin:0 0 6px;letter-spacing:-.6px}
+  h2{font-size:21px;margin:52px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--line);letter-spacing:-.3px}
+  h3{font-size:15.5px;margin:28px 0 8px;color:#cbd3df}
+  p{margin:11px 0}
+  .lede{font-size:16.5px;color:var(--dim);max-width:76ch;margin-bottom:8px}
+  ul{margin:10px 0;padding-left:20px}
+  li{margin:5px 0}
+
+  table{border-collapse:collapse;width:100%;margin:15px 0;font-size:13.5px}
+  th,td{text-align:left;padding:8px 11px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--faint);font-weight:600;font-size:11px;letter-spacing:.06em;text-transform:uppercase}
+  tbody tr:hover{background:var(--panel2)}
+  td code{white-space:nowrap}
+
+  .tag{display:inline-block;font-size:10.5px;padding:1px 7px;border-radius:9px;
+       border:1px solid var(--line);color:var(--dim);font-family:var(--mono)}
+  .ok{color:var(--ok);border-color:#1f4a27}
+  .warn{color:var(--warn);border-color:#5a4a15}
+  .bad{color:var(--bad);border-color:#5d2320}
+
+  .note{border-left:2px solid var(--accent);background:var(--panel);padding:11px 15px;margin:16px 0;font-size:14px}
+  .danger{border-left-color:var(--bad)}
+  .caution{border-left-color:var(--warn)}
+  .note b{color:var(--fg)}
+
+  .flow{font-family:var(--mono);font-size:12px;line-height:1.55;background:#0b0d11;
+        border:1px solid var(--line);border-radius:6px;padding:18px;overflow-x:auto;color:#aab4c4;margin:16px 0}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:12px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:14px 16px}
+  .card h4{margin:0 0 5px;font-size:13.5px;color:var(--fg)}
+  .card p{margin:0;font-size:12.5px;color:var(--dim);line-height:1.55}
+
+  .stages{counter-reset:s;list-style:none;padding:0;margin:18px 0}
+  .stages li{counter-increment:s;position:relative;padding:11px 0 11px 46px;border-bottom:1px solid var(--line)}
+  .stages li::before{content:counter(s);position:absolute;left:0;top:11px;width:26px;height:26px;
+    border:1px solid var(--line);border-radius:50%;display:flex;align-items:center;justify-content:center;
+    font-family:var(--mono);font-size:12px;color:var(--accent);background:var(--panel)}
+  .stages b{display:block;font-size:14px}
+  .stages span{font-size:12.5px;color:var(--dim)}
+
+  hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+  .meta{font-size:12px;color:var(--faint);font-family:var(--mono)}
+  footer{margin-top:60px;padding-top:18px;border-top:1px solid var(--line);font-size:12px;color:var(--faint)}
+  @media(max-width:900px){nav{display:none}main{padding:26px 20px 80px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav>
+  <div class="brand"><b>Snow Commander</b><span>Security tools deployment</span></div>
+  <div class="grp">Understand</div>
+  <a href="#overview">Overview</a>
+  <a href="#does">What it does</a>
+  <a href="#why">Why not containerize agents</a>
+  <a href="#stack">Tech stack</a>
+  <a href="#arch">Architecture</a>
+  <a href="#flow">End-to-end flow</a>
+  <a href="#mechanism">Mechanism</a>
+  <div class="grp">Reference</div>
+  <a href="#scripts">Scripts</a>
+  <a href="#packages">Package selection</a>
+  <a href="#creds">Credentials</a>
+  <a href="#rhsm">Subscriptions</a>
+  <div class="grp">Run it</div>
+  <a href="#vm">From your VM</a>
+  <a href="#one-template">One template</a>
+  <a href="#one-vsphere">One vSphere</a>
+  <a href="#all-three">All three vSphere</a>
+  <a href="#fleet">Fleet deploy</a>
+  <a href="#pipeline">GitHub pipeline</a>
+  <a href="#gitcli">Git CLI</a>
+  <div class="grp">Operate</div>
+  <a href="#exit">Exit codes</a>
+  <a href="#trouble">Troubleshooting</a>
+  <a href="#security">Security</a>
+</nav>
+
+<main>
+
+<h1>Snow Commander</h1>
+<p class="lede">Automated deployment, validation and teardown of enterprise security tooling across
+Red Hat Enterprise Linux estates — from a vSphere template to a verified host, with every step logged.</p>
+<p class="meta">CrowdStrike Falcon 8.10.0-19402 &middot; Tanium Client 7.8.4.1298 &middot; EL7–EL10 &middot; x86_64 + aarch64</p>
+
+<h2 id="overview">Overview</h2>
+<p>Snow Commander installs and verifies five security components on RHEL-family servers. It grew out of a
+single installer script and now has four layers that share the same core logic: a host-side orchestrator,
+an SSH fan-out control plane, a container image, and a CI/CD pipeline.</p>
+
+<div class="grid">
+  <div class="card"><h4>Host orchestrator</h4><p><code>security.sh</code> runs on the target. Detects the platform, picks and validates packages, installs, reports.</p></div>
+  <div class="card"><h4>Control plane</h4><p><code>deploy_targets.sh</code> fans out over SSH to many hosts with bounded concurrency and retries.</p></div>
+  <div class="card"><h4>Container</h4><p>AlmaLinux 9 image carrying the scripts and all 14 packages. Orchestrates outward; runs no agent itself.</p></div>
+  <div class="card"><h4>Validation harness</h4><p><code>e2e_validate.sh</code> builds a VM from a template, installs, verifies, uninstalls, confirms.</p></div>
+</div>
+
+<h3>The five components</h3>
+<table>
+<thead><tr><th>Component</th><th>What it installs</th><th>Verified by</th></tr></thead>
+<tbody>
+<tr><td><code>crowdstrike</code></td><td>Falcon sensor RPM, registers to the tenant CID</td><td>service active + AID assigned</td></tr>
+<tr><td><code>tanium</code></td><td>Tanium client RPM + <code>tanium-init.dat</code></td><td>service active</td></tr>
+<tr><td><code>cmdbsync</code></td><td>Local account + validated sudoers policy</td><td><code>visudo -c</code> passes</td></tr>
+<tr><td><code>sentinel</code></td><td>Azure Arc <code>azcmagent</code>, connects to a resource group</td><td>agent reports Connected</td></tr>
+<tr><td><code>syslog</code></td><td>rsyslog forwarding to two collectors</td><td>service active + config present</td></tr>
+</tbody>
+</table>
+
+<h2 id="does">What it does</h2>
+<ul>
+<li><b>Detects the platform</b> from <code>/etc/os-release</code> and maps RHEL, CentOS, Rocky, AlmaLinux and Oracle Linux onto an <code>elN</code> tag.</li>
+<li><b>Selects the right package</b> out of 14 staged RPMs based on that tag and the architecture. No version is hardcoded.</li>
+<li><b>Validates before installing</b> — header parse, name match, architecture fit and payload digest verification.</li>
+<li><b>Installs idempotently.</b> Re-running reports <code>UNCHANGED</code> rather than reinstalling or bouncing a healthy service.</li>
+<li><b>Never blindly overwrites.</b> Existing config is backed up to <code>&lt;file&gt;.sectools-bak.&lt;timestamp&gt;</code> first.</li>
+<li><b>Reports per host and per component</b> so one failure never masks another.</li>
+<li><b>Redacts secrets</b> from stdout and logs while keeping installation status fully visible.</li>
+</ul>
+
+<div class="note"><b>Why digest validation matters.</b> A staged Falcon RPM was 3.8&nbsp;MB against a declared
+155&nbsp;MB payload — a truncated download that would have failed mid-install with a confusing error.
+<code>rpm -K</code> catches it before the host is touched.</div>
+
+<h2 id="why">Why the agents are not containerized</h2>
+<p>The container orchestrates; it never hosts an agent. Each of these is bound to its host, and a
+containerized copy would report the container instead of the VM:</p>
+<table>
+<thead><tr><th>Agent</th><th>Host binding</th></tr></thead>
+<tbody>
+<tr><td>CrowdStrike Falcon</td><td>Kernel / eBPF sensor, host-unique agent ID</td></tr>
+<tr><td>Tanium Client</td><td>Host systemd, hardware and patch inventory</td></tr>
+<tr><td>Azure Arc</td><td>Registers the machine identity in Azure</td></tr>
+<tr><td>rsyslog</td><td>Owns the host logging pipeline</td></tr>
+<tr><td>cmdbsync</td><td>Local user, sudoers, host discovery commands</td></tr>
+</tbody>
+</table>
+
+<h2 id="stack">Tech stack and where each piece is used</h2>
+<table>
+<thead><tr><th>Technology</th><th>Used for</th><th>Where</th></tr></thead>
+<tbody>
+<tr><td><b>Bash</b> <span class="tag">strict mode</span></td><td>All orchestration. <code>set -Eeuo pipefail</code>, traps, explicit exit codes</td><td><code>security.sh</code>, <code>lib/</code>, <code>scripts/*.sh</code></td></tr>
+<tr><td><b>Python 3</b> + <b>pyVmomi</b> 8.0.2</td><td>vSphere API: locate template, clone, NIC, power on, await IP</td><td><code>scripts/vsphere_provision.py</code></td></tr>
+<tr><td><b>rpm</b></td><td>Header inspection and <code>rpm -K</code> payload digest verification</td><td><code>lib/pkg_select.sh</code>, container build, CI</td></tr>
+<tr><td><b>OpenSSH</b></td><td>Transport to every target; secrets on a separate channel</td><td><code>deploy_targets.sh</code>, <code>e2e_validate.sh</code></td></tr>
+<tr><td><b>sshpass</b></td><td>Password auth for freshly cloned templates without keys</td><td><code>e2e_validate.sh</code> only</td></tr>
+<tr><td><b>tar</b> + <b>gzip</b></td><td>88&nbsp;MB per-host bundle streamed over SSH</td><td><code>stage_bundle.sh</code></td></tr>
+<tr><td><b>systemd</b></td><td>Service enable, restart and <code>is-active</code> verification</td><td><code>security.sh</code> on targets</td></tr>
+<tr><td><b>Podman</b> / <b>Docker</b></td><td>Control-plane image, AlmaLinux 9 base, non-root</td><td><code>Dockerfile</code>, <code>docker-compose.yml</code></td></tr>
+<tr><td><b>AlmaLinux 9</b></td><td>Base image — native <code>rpm</code>, deliberately independent of target OS</td><td><code>Dockerfile</code></td></tr>
+<tr><td><b>GitHub Actions</b></td><td>Lint, manifest, secret hygiene, platform matrix; gated deploys</td><td><code>.github/workflows/</code></td></tr>
+<tr><td><b>subscription-manager</b></td><td>RHSM register / unregister, repos per EL version</td><td><code>sub-reg.sh</code></td></tr>
+<tr><td><b>Azure Arc</b> (<code>azcmagent</code>)</td><td>Sentinel onboarding via service principal</td><td><code>sentinel_core.sh</code></td></tr>
+</tbody>
+</table>
+
+<h2 id="arch">Architecture</h2>
+<div class="flow">┌──────────────────────── CONTROL PLANE (jump VM or container) ────────────────────────┐
+│                                                                                       │
+│   e2e_validate.sh ──── vsphere_provision.py ─────► vCenter API (443)                 │
+│         │                  scope: SnowCommander/Templates ONLY                        │
+│         │                                                                             │
+│         ├──── stage_bundle.sh ────► reads deploy-manifest.txt                         │
+│         │         picks 1 Falcon + 1 Tanium for the probed EL/arch                    │
+│         │         validates digests ─► 88 MB tar.gz                                   │
+│         │                                                                             │
+│         └──── deploy_targets.sh ──► SSH fan-out, N hosts in parallel                  │
+│                                                                                       │
+│   Holds: 14 RPMs, all scripts.   Holds NO secrets.   Runs NO agent.                   │
+└───────────────────────────────┬───────────────────────────────────────────────────────┘
+                                │ SSH :22   (bundle on one channel, secrets on another)
+                                ▼
+┌──────────────────────── TARGET (RHEL/CentOS/Rocky/Alma/Oracle 7-10) ─────────────────┐
+│   /var/tmp/sectools/                                                                  │
+│     security.sh          ← orchestrator, runs as root via sudo                        │
+│     lib/pkg_select.sh    ← detect → select → validate                                 │
+│     sub-reg.sh           ← RHSM register / unregister                                 │
+│     securitytools.env    ← mode 0600, shredded after the run                          │
+│                                                                                       │
+│   systemd:  falcon-sensor  ·  taniumclient  ·  rsyslog  ·  azcmagent                  │
+└───────────────────────────────────────────────────────────────────────────────────────┘</div>
+
+<h2 id="flow">End-to-end flow</h2>
+<p>The validation harness runs eight stages and prints a pass/fail matrix at the end.</p>
+<ol class="stages">
+<li><b>Connect to vSphere</b><span>pyVmomi <code>SmartConnect</code> to vCenter on 443.</span></li>
+<li><b>Find the template</b><span>Search restricted to <code>SnowCommander/Templates</code>. Anything outside is invisible and refused with exit 7.</span></li>
+<li><b>Template → VM</b><span>Clone (template preserved), connect the NIC at both <code>connected</code> and <code>startConnected</code>, power on, wait for an IPv4 address.</span></li>
+<li><b>Place the scripts</b><span>Probe the guest, build a matched 88 MB bundle, extract to <code>/var/tmp/sectools</code>. Secrets follow on a separate channel into a 0600 file.</span></li>
+<li><b>Install the tools</b><span>RHSM register if needed, then <code>security.sh all</code> — detect, select, validate, install, configure.</span></li>
+<li><b>Verify with systemctl</b><span><code>systemctl is-active</code> per service, <code>rpm -q</code> per package, plus structured verification.</span></li>
+<li><b>Uninstall the tools</b><span><code>uninstall.sh all</code>, then confirm packages and services are gone. Appliance templates unregister from RHSM here.</span></li>
+<li><b>Confirm the scripts remain</b><span>Assert every expected script is still present, then shred <code>securitytools.env</code>.</span></li>
+</ol>
+
+<h2 id="mechanism">Mechanism</h2>
+
+<h3>Platform detection</h3>
+<p>Reads <code>ID</code> and <code>VERSION_ID</code> from <code>/etc/os-release</code>, maps the family to an
+<code>elN</code> tag, and normalises the architecture. Debian, Ubuntu and Fedora are rejected with exit 3 and
+an explicit message rather than being silently mis-served — no <code>.deb</code> packages exist here.</p>
+<div class="note"><b>Names lie, metadata doesn't.</b> The template <code>BLR-GI-6.6</code> is
+Vocera 6.6 running on <b>RHEL 7.9</b>, not RHEL 6.6. Detection reads the OS, never the label.</div>
+
+<h3>Idempotency</h3>
+<p>Every component compares desired state against actual state:</p>
+<ul>
+<li><b>CrowdStrike</b> — skips entirely when build, CID and service state all match. CID compared as bare 32 hex characters, since <code>falconctl</code> reports it lowercase and without the checksum suffix.</li>
+<li><b>Tanium</b> — restarts only if the RPM or <code>tanium-init.dat</code> actually changed.</li>
+<li><b>cmdbsync</b> — never resets an existing account's password unless <code>CMDBSYNC_FORCE_PASSWORD=1</code>.</li>
+<li><b>Sentinel</b> — skipped when already Connected to the intended subscription, because <code>sentinel_core.sh</code> disconnects before reconnecting.</li>
+<li><b>syslog</b> — writes only on content change, validates with <code>rsyslogd -N1</code>, rolls back on failure.</li>
+</ul>
+
+<h3>Secret handling</h3>
+<p>Secrets are never baked into an image, written to a tarball, or passed as command arguments where
+<code>ps</code> could read them. They travel on a dedicated SSH channel into a 0600 file and are shredded
+afterwards. A <code>sed</code> filter in the output pipeline masks secret <i>values</i> everywhere they
+appear — including in output from <code>dnf</code>, <code>falconctl</code> and <code>azcmagent</code>,
+which these scripts do not control. Installation status is never hidden. The CID is deliberately not
+redacted: it is an identifier, not a credential.</p>
+
+<h2 id="scripts">Scripts — what each one does</h2>
+<h3>Core</h3>
+<table>
+<thead><tr><th>Script</th><th>Lines</th><th>Runs on</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>security.sh</code></td><td>1071</td><td>target</td><td>Main orchestrator. Modes: <code>all</code>, individual components, <code>verify</code>, <code>plan</code>.</td></tr>
+<tr><td><code>lib/pkg_select.sh</code></td><td>459</td><td>both</td><td>OS→elN detection, package selection, five-point validation incl. digests.</td></tr>
+<tr><td><code>uninstall.sh</code></td><td>990</td><td>target</td><td>Removes packages, services, directories, users and sudoers.</td></tr>
+<tr><td><code>sub-reg.sh</code></td><td>185</td><td>target</td><td>RHSM <code>register</code> / <code>unregister</code> / <code>status</code>, repos per EL version.</td></tr>
+<tr><td><code>sentinel_core.sh</code></td><td>186</td><td>target</td><td>Azure Arc onboarding via service principal.</td></tr>
+</tbody>
+</table>
+
+<h3>Orchestration</h3>
+<table>
+<thead><tr><th>Script</th><th>Lines</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>scripts/e2e_validate.sh</code></td><td>515</td><td>The 8-stage harness. Per-stage logging and a final matrix.</td></tr>
+<tr><td><code>scripts/vsphere_provision.py</code></td><td>398</td><td>vSphere stages. Scope-locked to <code>SnowCommander/Templates</code>.</td></tr>
+<tr><td><code>scripts/deploy_targets.sh</code></td><td>308</td><td>SSH fan-out with bounded concurrency and retries.</td></tr>
+<tr><td><code>scripts/stage_bundle.sh</code></td><td>189</td><td>Builds the per-target bundle from the manifest.</td></tr>
+<tr><td><code>entrypoint.sh</code></td><td>155</td><td>Container entry: <code>plan</code>, <code>verify</code>, <code>deploy</code>, <code>packages</code>, <code>bundle</code>.</td></tr>
+</tbody>
+</table>
+
+<h3>Standalone component installers</h3>
+<p>Shipped to targets for manual incident-response use. <code>security.sh</code> does not call them —
+it has its own inlined component logic.</p>
+<p><code>install_crowdstrike.sh</code> &middot; <code>install_tanium.sh</code> &middot;
+<code>install_cmdbsync.sh</code> &middot; <code>install_sentinel.sh</code> &middot; <code>install_syslog.sh</code></p>
+
+<h2 id="packages">Package selection</h2>
+<p>14 RPMs staged; exactly two are shipped per host. Selection is by glob with the highest version winning,
+so staging a newer sensor needs no code change.</p>
+<table>
+<thead><tr><th>Target</th><th>CrowdStrike</th><th>Tanium</th></tr></thead>
+<tbody>
+<tr><td>el7 x86_64</td><td class="ok">✓</td><td class="ok">✓</td></tr>
+<tr><td>el7 aarch64</td><td class="bad">not published</td><td>✓ via arch match</td></tr>
+<tr><td>el8 / el9 / el10 x86_64</td><td class="ok">✓</td><td class="ok">✓</td></tr>
+<tr><td>el8 / el9 / el10 aarch64</td><td class="ok">✓</td><td class="ok">✓</td></tr>
+</tbody>
+</table>
+<div class="note"><b>Tanium is arch-keyed, not version-keyed.</b> The seven Tanium filenames contain only
+two unique payloads — one <code>glibc2.17</code> x86_64 build and one <code>glibc2.26</code> aarch64 build.
+The <code>rheN</code> in the filename is cosmetic, so selection falls back to matching the RPM header's
+architecture.</div>
+
+<h3>Validation gate</h3>
+<p>Every candidate must pass all five checks or the run aborts before the host is modified: file present
+and non-empty, header parseable, package name matches, architecture installable, payload digests verify.</p>
+
+<h2 id="creds">Credentials — where they are set</h2>
+<p>Four sets, one file, kept <b>outside</b> the repository. Everything is read from the environment;
+nothing is ever a command-line argument.</p>
+<pre><code><span class="cmt"># Create it once</span>
+cd /home/tpx-admin/snowcommander_scripts
+cp credentials.env.example ~/.snowcommander-creds.env
+chmod 600 ~/.snowcommander-creds.env
+vi ~/.snowcommander-creds.env
+
+<span class="cmt"># Load into every new shell</span>
+set -a; source ~/.snowcommander-creds.env; set +a
+
+<span class="cmt"># Confirm without printing secrets</span>
+echo "vc=${VCENTER_USER} vc_pw=${#VCENTER_PASSWORD} ssh_pw=${#SSHPASS} cid=${FALCON_CID}"</code></pre>
+<table>
+<thead><tr><th>Set</th><th>Variables</th><th>Used by</th></tr></thead>
+<tbody>
+<tr><td>vSphere</td><td><code>VCENTER_USER</code>, <code>VCENTER_PASSWORD</code></td><td>Stages 1–3</td></tr>
+<tr><td>Target VM</td><td><code>TARGET_SSH_USER</code> + <code>TARGET_SSH_KEY</code> <i>or</i> <code>SSHPASS</code></td><td>Stages 4–8</td></tr>
+<tr><td>Security tools</td><td><code>FALCON_CID</code>, <code>CMDBSYNC_PASSWORD</code>, <code>AZCM_*</code></td><td>Stage 5</td></tr>
+<tr><td>Red Hat</td><td><code>RHSM_USERNAME</code>, <code>RHSM_PASSWORD</code></td><td>Stage 5 register/unregister</td></tr>
+</tbody>
+</table>
+<div class="note"><b>No provisioning token.</b> This tenant does not require one. It is absent from every
+template and rendering path; <code>security.sh</code> still passes <code>--provisioning-token</code> if the
+variable is ever set, so a tenant that needs one works without a code change.</div>
+<div class="note caution"><b>Least privilege.</b> Give the vCenter account Clone and Power On on
+<code>SnowCommander/Templates</code> only, so the restriction is enforced by vCenter permissions as well as
+by the code.</div>
+
+<h2 id="rhsm">Red Hat subscriptions</h2>
+<p>rsyslog installs from Red Hat repositories, so an unregistered RHEL host cannot complete the syslog
+component. <code>--rhsm-mode auto</code> (the default) decides from the template name:</p>
+<table>
+<thead><tr><th>Template</th><th>Behaviour</th></tr></thead>
+<tbody>
+<tr><td><code>*Redhat*</code></td><td>Register, install, verify — <b>stays registered</b></td></tr>
+<tr><td><code>*GI*</code>, <code>*Engage*</code></td><td>Register, install, verify — <b>unregisters</b> after stage 6</td></tr>
+<tr><td>anything else</td><td>Skipped; override with <code>--rhsm-mode keep|remove</code></td></tr>
+</tbody>
+</table>
+<p>Repository names are derived per version, not hardcoded:</p>
+<table>
+<thead><tr><th>Detected</th><th>Repositories enabled</th></tr></thead>
+<tbody>
+<tr><td>el7</td><td><code>rhel-7-server-rpms</code>, <code>rhel-7-server-extras-rpms</code></td></tr>
+<tr><td>el8 / el9 / el10</td><td><code>rhel-N-for-&lt;arch&gt;-baseos-rpms</code>, <code>…-appstream-rpms</code></td></tr>
+</tbody>
+</table>
+
+<h2 id="vm">Execution — from your VM</h2>
+<p>The harness runs on the jump VM because it needs <code>pyvmomi</code> and <code>sshpass</code>.
+The container is the right tool for production fleet deploys over key auth.</p>
+<pre><code><span class="cmt"># 0. Prepare — once per shell</span>
+cd /home/tpx-admin/snowcommander_scripts
+set -a; source ~/.snowcommander-creds.env; set +a
+
+<span class="cmt"># 1. Prove credentials and scope. Read-only, changes nothing.</span>
+<span class="cmt">#    Prints each template's REAL guest OS.</span>
+python3 scripts/vsphere_provision.py \
+  --vcenter blr-vsphere-01.strykercorp.com \
+  --list-templates --insecure
+
+<span class="cmt"># 2. Dry run against a host you already have — no VM is created</span>
+./scripts/e2e_validate.sh --existing-host blr-gi-6 --keep-tools</code></pre>
+
+<h2 id="one-template">One template at a time</h2>
+<pre><code>./scripts/e2e_validate.sh \
+  --vcenter fw-vsphere-01.strykercorp.com \
+  --template BLR-Redhat-9 \
+  --name e2e-fw-rhel9 \
+  --portgroup <span class="str">'VM Network'</span> \
+  --insecure</code></pre>
+<p>Useful variations:</p>
+<pre><code><span class="cmt"># keep the tools installed for inspection (skip stage 7)</span>
+./scripts/e2e_validate.sh ... --keep-tools
+
+<span class="cmt"># force subscription behaviour instead of inferring it</span>
+./scripts/e2e_validate.sh ... --rhsm-mode remove
+
+<span class="cmt"># only some components</span>
+./scripts/e2e_validate.sh ... --components <span class="str">"crowdstrike tanium"</span></code></pre>
+
+<h2 id="one-vsphere">Every template in one vSphere</h2>
+<pre><code>cd /home/tpx-admin/snowcommander_scripts
+set -a; source ~/.snowcommander-creds.env; set +a
+
+VC=fw-vsphere-01.strykercorp.com
+PG=<span class="str">'VM Network'</span>
+
+<span class="cmt"># Discover names from vCenter rather than hardcoding them</span>
+python3 scripts/vsphere_provision.py --vcenter <span class="kw">$VC</span> --list-templates --insecure
+
+<span class="kw">for</span> t <span class="kw">in</span> BLR-Redhat-9 BLR-Redhat-10 BLR-GI-6.6 BLR-GI-7.1 BLR-GI-7.2 BLR-GI-7.3; <span class="kw">do</span>
+  <span class="kw">echo</span> <span class="str">"########## $t ##########"</span>
+  ./scripts/e2e_validate.sh \
+    --vcenter <span class="kw">$VC</span> --template <span class="str">"$t"</span> \
+    --name <span class="str">"e2e-fw-${t,,}"</span> \
+    --portgroup <span class="kw">$PG</span> --insecure \
+    2>&1 | tee <span class="str">"/tmp/e2e-fw-${t}.log"</span>
+<span class="kw">done</span></code></pre>
+
+<h2 id="all-three">All three vSphere at once</h2>
+<p>Each vCenter is processed in its own background job, with one log file per template.
+<code>wait</code> blocks until every site finishes, then a combined summary is printed.</p>
+<pre><code>cd /home/tpx-admin/snowcommander_scripts
+set -a; source ~/.snowcommander-creds.env; set +a
+
+mkdir -p /tmp/e2e-runs
+
+run_site() {
+  <span class="kw">local</span> vc=<span class="str">"$1"</span> site=<span class="str">"$2"</span> pg=<span class="str">"$3"</span>; <span class="kw">shift</span> 3
+  <span class="kw">for</span> t <span class="kw">in</span> <span class="str">"$@"</span>; <span class="kw">do</span>
+    ./scripts/e2e_validate.sh \
+      --vcenter <span class="str">"$vc"</span> --template <span class="str">"$t"</span> \
+      --name <span class="str">"e2e-${site}-${t,,}"</span> \
+      --portgroup <span class="str">"$pg"</span> --insecure \
+      > <span class="str">"/tmp/e2e-runs/${site}-${t}.log"</span> 2>&1
+    <span class="kw">echo</span> <span class="str">"${site} ${t} exit=$?"</span> >> /tmp/e2e-runs/summary.txt
+  <span class="kw">done</span>
+}
+
+: > /tmp/e2e-runs/summary.txt
+
+run_site blr-vsphere-01.strykercorp.com blr <span class="str">'VM Network'</span> BLR-Redhat-9 BLR-Redhat-10 BLR-GI-6.6 &
+run_site fw-vsphere-01.strykercorp.com  fw  <span class="str">'VM Network'</span> BLR-Redhat-9 BLR-GI-7.1 &
+run_site stc-vsphere-01.strykercorp.com stc <span class="str">'VM Network'</span> BLR-Redhat-9 BLR-GI-7.2 &
+
+wait
+<span class="kw">echo</span> <span class="str">"=== combined summary ==="</span>
+column -t /tmp/e2e-runs/summary.txt</code></pre>
+<div class="note caution"><b>Run one template end to end first.</b> Parallel runs across three sites create
+real VMs simultaneously. Confirm a single clean pass before scaling out.</div>
+
+<h2 id="fleet">Fleet deploy — existing servers</h2>
+<p>For servers that already exist, skip vSphere entirely and use the container.</p>
+<pre><code><span class="cmt"># Build once</span>
+cd /home/tpx-admin/snowcommander_scripts
+podman build -t snowcommander-deployer:latest .
+
+<span class="cmt"># Inventory: one hostname per line</span>
+cp inventory.example inventory && vi inventory
+
+<span class="cmt"># plan (read-only) → verify → deploy</span>
+podman run --rm \
+  --env-file ~/.snowcommander-creds.env \
+  -v ./secrets/ssh_key:/run/secrets/ssh_key:ro \
+  -v ./secrets/known_hosts:/run/secrets/known_hosts:ro \
+  -v ./inventory:/etc/snowcommander/inventory:ro \
+  -e INVENTORY=/etc/snowcommander/inventory \
+  -e PARALLEL=10 -e RETRIES=2 \
+  snowcommander-deployer:latest plan</code></pre>
+<p>Swap the final argument for <code>verify</code> or <code>deploy all</code>. Or run the fan-out directly
+on the VM:</p>
+<pre><code>./scripts/deploy_targets.sh --inventory ./inventory --mode plan --parallel 10
+./scripts/deploy_targets.sh --hosts host1,host2 --mode deploy --components all --retries 2</code></pre>
+
+<h2 id="pipeline">GitHub pipeline</h2>
+<p>Two workflows in <code>.github/workflows/</code>.</p>
+
+<h3>CI — automatic on every push</h3>
+<table>
+<thead><tr><th>Job</th><th>Enforces</th></tr></thead>
+<tbody>
+<tr><td><code>shell-lint</code></td><td><code>bash -n</code> and ShellCheck on every script</td></tr>
+<tr><td><code>manifest</code></td><td>Required files exist; manifest never lists a secrets file</td></tr>
+<tr><td><code>secret-hygiene</code></td><td>No tracked secrets or keys; CID correct; no <code>*-F0</code> regression</td></tr>
+<tr><td><code>platform-matrix</code></td><td>All nine distro cases; digest-verifies every staged RPM</td></tr>
+<tr><td><code>bundle</code></td><td>Builds a real bundle and asserts it carries no secrets</td></tr>
+</tbody>
+</table>
+
+<h3>Deploy — manual dispatch</h3>
+<p>Actions → <b>Deploy security tools</b> → Run workflow.</p>
+<table>
+<thead><tr><th>Input</th><th>Value</th></tr></thead>
+<tbody>
+<tr><td><code>targets</code></td><td>Comma-separated hosts, or a path to a host file on the runner</td></tr>
+<tr><td><code>components</code></td><td><code>all</code> or a specific component</td></tr>
+<tr><td><code>mode</code></td><td><code>plan</code> → <code>verify</code> → <code>deploy</code></td></tr>
+<tr><td><code>ssh_user</code></td><td>Login on the targets</td></tr>
+</tbody>
+</table>
+<p>One-time setup:</p>
+<pre><code><span class="cmt"># Self-hosted runner, labelled: self-hosted, linux, snowcommander</span>
+<span class="cmt"># (GitHub-hosted runners cannot reach *.strykercorp.com)</span>
+
+<span class="cmt"># Packages on the runner's local disk — not in git</span>
+sudo mkdir -p /opt/snowcommander-packages/{crowdstrike,tanium}
+sudo cp crowdstrike/*.rpm /opt/snowcommander-packages/crowdstrike/
+sudo cp tanium/*.rpm tanium/tanium-init.dat /opt/snowcommander-packages/tanium/
+sudo chmod 600 /opt/snowcommander-packages/tanium/tanium-init.dat</code></pre>
+<p><b>Repository secrets:</b> <code>DEPLOY_SSH_KEY</code>, <code>SSH_KNOWN_HOSTS</code>,
+<code>CMDBSYNC_PASSWORD</code>, <code>AZCM_SP_CLIENT_ID</code>, <code>AZCM_SP_SECRET</code>,
+<code>AZCM_SUBSCRIPTION_ID</code>, <code>AZCM_TENANT_ID</code>, <code>RHSM_PASSWORD</code>.<br>
+<b>Repository variables:</b> <code>FALCON_CID</code>, <code>AZCM_RESOURCE_GROUP</code>,
+<code>AZCM_LOCATION</code>, <code>AZCM_CLOUD</code>, <code>AZCM_TAGS</code>, <code>SYSLOG_SERVER1</code>,
+<code>SYSLOG_SERVER2</code>, <code>SYSLOG_PORT</code>, <code>CMDBSYNC_UID</code>, <code>CMDBSYNC_GID</code>.<br>
+<b>Environment:</b> create <code>production</code> with required reviewers — this gates <code>deploy</code>.</p>
+
+<h2 id="gitcli">Git CLI</h2>
+<pre><code><span class="cmt"># Clone</span>
+git clone https://github.com/Kiruthika-syk/Snowcommander-scripts.git
+cd Snowcommander-scripts
+
+<span class="cmt"># Packages are NOT in git (~548 MB, near GitHub's 100 MB per-file limit).</span>
+<span class="cmt"># Stage them from the runner or an internal artifact store:</span>
+cp -r /opt/snowcommander-packages/crowdstrike ./crowdstrike
+cp -r /opt/snowcommander-packages/tanium      ./tanium
+
+<span class="cmt"># Verify what landed</span>
+./lib/pkg_select.sh matrix
+
+<span class="cmt"># Normal change cycle</span>
+git checkout -b fix/whatever
+git add -A
+git diff --cached --name-only | grep -E <span class="str">'securitytools\.env$|\.rpm$|tanium-init\.dat$'</span> \
+  && <span class="kw">echo</span> <span class="str">"STOP - secret or package staged"</span> || <span class="kw">echo</span> <span class="str">"clean"</span>
+git commit -m <span class="str">"..."</span>
+git push -u origin fix/whatever</code></pre>
+<p>CI runs automatically on push and will fail the build if a secrets file is ever tracked.</p>
+
+<h2 id="exit">Exit codes</h2>
+<table>
+<thead><tr><th>Code</th><th>Meaning</th><th>Emitted by</th></tr></thead>
+<tbody>
+<tr><td><code>0</code></td><td>Success</td><td>all</td></tr>
+<tr><td><code>2</code></td><td>Usage error</td><td>all</td></tr>
+<tr><td><code>3</code></td><td>Unsupported OS</td><td><code>security.sh</code></td></tr>
+<tr><td><code>4</code></td><td>Unsupported architecture</td><td><code>security.sh</code></td></tr>
+<tr><td><code>5</code></td><td>Package selection or validation failed</td><td><code>security.sh</code></td></tr>
+<tr><td><code>6</code></td><td>Insufficient privilege</td><td><code>security.sh</code></td></tr>
+<tr><td><code>7</code></td><td><b>Scope violation</b> — outside <code>SnowCommander/Templates</code></td><td><code>vsphere_provision.py</code></td></tr>
+<tr><td><code>10</code></td><td>Partial — some components succeeded</td><td><code>security.sh</code></td></tr>
+<tr><td><code>11</code></td><td>All components failed</td><td><code>security.sh</code></td></tr>
+<tr><td><code>20</code> / <code>21</code></td><td>Fleet partial / all hosts failed</td><td><code>deploy_targets.sh</code></td></tr>
+<tr><td><code>3x</code></td><td>Harness stage <code>x</code> failed (<code>35</code> = stage 5)</td><td><code>e2e_validate.sh</code></td></tr>
+</tbody>
+</table>
+
+<h2 id="trouble">Troubleshooting</h2>
+<table>
+<thead><tr><th>Symptom</th><th>Cause and fix</th></tr></thead>
+<tbody>
+<tr><td>Stage 1 fails, exit 3</td><td>Bad credentials, or add <code>--insecure</code> for a self-signed vCenter certificate</td></tr>
+<tr><td>Stage 2 fails, exit 4</td><td>Template is not inside <code>SnowCommander/Templates</code>. Run <code>--list-templates</code></td></tr>
+<tr><td>exit 7</td><td>Scope violation — the object lies outside the permitted folder. Working as intended</td></tr>
+<tr><td>Stage 3 IP timeout</td><td>No VMware Tools in the template, or the portgroup has no DHCP</td></tr>
+<tr><td>Stage 4 SSH failure</td><td>Template needs <code>PasswordAuthentication yes</code>, and sudo for the login user</td></tr>
+<tr><td>Stage 5 syslog fails</td><td>RHSM registration failed — check <code>RHSM_USERNAME</code> / <code>RHSM_PASSWORD</code></td></tr>
+<tr><td><code>STAGE_FAILED</code> in fan-out</td><td>Unsupported OS/arch, or no package pair — e.g. el7 aarch64 Falcon</td></tr>
+<tr><td>Falcon active but no AID</td><td>Sensor is running but has not reached the cloud. Check egress to <code>ts01-b.cloudsink.net:443</code></td></tr>
+<tr><td><code>UNREACHABLE</code></td><td>SSH failed. Test manually with the same key or password</td></tr>
+<tr><td><code>NO_SUDO</code></td><td>Passwordless sudo missing on the target</td></tr>
+<tr><td>Corrupt package</td><td><code>rpm -K</code> failed. Re-stage from the vendor; run <code>./lib/pkg_select.sh matrix</code></td></tr>
+</tbody>
+</table>
+
+<h2 id="security">Security</h2>
+<table>
+<thead><tr><th>Control</th><th>Implementation</th></tr></thead>
+<tbody>
+<tr><td>vSphere scope</td><td>Hard-locked to <code>SnowCommander/Templates</code>; checked again before any mutating call</td></tr>
+<tr><td>Non-destructive default</td><td>Clone preserves templates. <code>--mode convert</code> requires an explicit acknowledgement flag</td></tr>
+<tr><td>No secrets in images</td><td>Build fails if a secrets file is in the context</td></tr>
+<tr><td>No secrets in git</td><td><code>.gitignore</code> plus a CI job that fails on a tracked secrets file</td></tr>
+<tr><td>No secrets in <code>ps</code></td><td>Everything via environment or stdin, never command arguments</td></tr>
+<tr><td>Secret redaction</td><td><code>sed</code> filter masks values in stdout and logs, including third-party output</td></tr>
+<tr><td>Secrets removed after use</td><td><code>securitytools.env</code> shredded from the target at stage 8</td></tr>
+<tr><td>Non-root container</td><td><code>uid=998(deployer)</code>, <code>cap_drop: ALL</code>, read-only root filesystem</td></tr>
+<tr><td>Package integrity</td><td><code>rpm -K</code> digest verification at build, at stage time and on target</td></tr>
+<tr><td>Config safety</td><td>Existing files backed up before any overwrite</td></tr>
+<tr><td>Gated deploys</td><td>GitHub <code>production</code> environment with required reviewers</td></tr>
+</tbody>
+</table>
+
+<div class="note danger"><b>Outstanding.</b> Credentials that previously sat in a world-readable
+<code>securitytools.env</code> — the Azure service-principal secret, the cmdbsync password and the RHSM
+password — should be rotated. The file is now mode 600 and gitignored, but anything previously exposed
+should be considered compromised.</div>
+
+<footer>
+Snow Commander &middot; <a href="https://github.com/Kiruthika-syk/Snowcommander-scripts">github.com/Kiruthika-syk/Snowcommander-scripts</a><br>
+CrowdStrike Falcon 8.10.0-19402 &middot; Tanium Client 7.8.4.1298 &middot; 14 packages &middot; EL7–EL10 &middot; x86_64 + aarch64
+</footer>
+
+</main>
+</div>
+
+<script>
+// Highlight the nav entry for the section currently in view.
+const links = [...document.querySelectorAll('nav a')];
+const targets = links
+  .map(a => document.getElementById(a.getAttribute('href').slice(1)))
+  .filter(Boolean);
+
+const spy = new IntersectionObserver((entries) => {
+  entries.forEach(e => {
+    if (!e.isIntersecting) return;
+    links.forEach(a => a.classList.toggle(
+      'on', a.getAttribute('href') === '#' + e.target.id));
+  });
+}, { rootMargin: '-15% 0px -75% 0px' });
+
+targets.forEach(t => spy.observe(t));
+</script>
+</body>
+</html>
