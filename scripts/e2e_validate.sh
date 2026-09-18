@@ -1,0 +1,447 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# e2e_validate.sh - end-to-end validation harness
+#
+# Proves the deployment automation works against a pristine VM built from a
+# vSphere template, then leaves the VM clean with only the scripts in place.
+#
+# Eight stages, each logged explicitly:
+#   1. connect to vSphere
+#   2. find the template
+#   3. produce a VM from the template, connect the NIC, power on, get an IP
+#   4. place the scripts on the VM
+#   5. install the security tools
+#   6. verify service status with systemctl
+#   7. uninstall the tools
+#   8. confirm the scripts still exist in the placed directory
+#
+# Runs on the jump host, not inside the container: it needs pyvmomi for the
+# vSphere stages and sshpass for templates that only allow password auth.
+# The container remains the right tool for production fleet deploys over keys.
+#
+# Credentials, all from the environment, never from the command line:
+#   VCENTER_USER / VCENTER_PASSWORD     vSphere
+#   TARGET_SSH_USER                     login on the new VM (default tpx-admin)
+#   SSHPASS                             target password (if no key)
+#   TARGET_SSH_KEY                      private key path (preferred over SSHPASS)
+#   FALCON_CID, FALCON_PROVISIONING_TOKEN, CMDBSYNC_PASSWORD, AZCM_*, ...
+#
+# Usage:
+#   scripts/e2e_validate.sh --vcenter blr-vsphere-01.strykercorp.com \
+#       --template BLR-Redhat-9 --name e2e-test-rhel9 \
+#       --portgroup 'VM Network' --insecure
+#
+#   scripts/e2e_validate.sh ... --existing-host blr-gi-6   # skip stages 1-3
+#   scripts/e2e_validate.sh ... --keep-tools               # skip stage 7
+#
+# Exit codes: 0 all stages passed, 2 usage, 3x stage failure (30+stage number)
+# ==============================================================================
+
+set -Eeuo pipefail
+IFS=$'\n\t'
+
+BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REMOTE_DIR="${REMOTE_DIR:-/var/tmp/sectools}"
+
+VCENTER=""
+TEMPLATE=""
+VM_NAME=""
+PORTGROUP=""
+DATASTORE=""
+MODE=clone
+CONFIRM_DESTROY=0
+INSECURE=""
+EXISTING_HOST=""
+KEEP_TOOLS=0
+KEEP_VM=0
+IP_TIMEOUT=300
+COMPONENTS=all
+
+TARGET_SSH_USER="${TARGET_SSH_USER:-tpx-admin}"
+TARGET_SSH_KEY="${TARGET_SSH_KEY:-}"
+
+# ------------------------------------------------------------------------------
+# Logging: every stage transition is explicit and timestamped.
+# ------------------------------------------------------------------------------
+C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'
+C_GREEN=$'\033[32m'; C_RED=$'\033[31m'; C_YELLOW=$'\033[33m'; C_CYAN=$'\033[36m'
+[[ -t 1 ]] || { C_RESET=""; C_BOLD=""; C_GREEN=""; C_RED=""; C_YELLOW=""; C_CYAN=""; }
+
+declare -A STAGE_RESULT=()
+declare -A STAGE_DETAIL=()
+CURRENT_STAGE=0
+TARGET_IP=""
+TARGET_HOST=""
+
+ts() { date '+%Y-%m-%d %H:%M:%S'; }
+say() { printf '[%s] %s\n' "$(ts)" "$*"; }
+info() { printf '[%s]   %s\n' "$(ts)" "$*"; }
+
+stage_begin() {
+  CURRENT_STAGE="$1"
+  printf '\n%s==============================================================================%s\n' "$C_CYAN" "$C_RESET"
+  printf '%s STAGE %s/8 - %s%s\n' "$C_BOLD" "$1" "$2" "$C_RESET"
+  printf '%s==============================================================================%s\n' "$C_CYAN" "$C_RESET"
+}
+
+stage_pass() {
+  STAGE_RESULT["$CURRENT_STAGE"]=PASS
+  STAGE_DETAIL["$CURRENT_STAGE"]="${1:-}"
+  printf '%s[%s]   STAGE %s PASS%s - %s\n' "$C_GREEN" "$(ts)" "$CURRENT_STAGE" "$C_RESET" "${1:-}"
+}
+
+stage_fail() {
+  STAGE_RESULT["$CURRENT_STAGE"]=FAIL
+  STAGE_DETAIL["$CURRENT_STAGE"]="${1:-}"
+  printf '%s[%s]   STAGE %s FAIL%s - %s\n' "$C_RED" "$(ts)" "$CURRENT_STAGE" "$C_RESET" "${1:-}"
+  summary
+  exit $((30 + CURRENT_STAGE))
+}
+
+stage_skip() {
+  STAGE_RESULT["$CURRENT_STAGE"]=SKIP
+  STAGE_DETAIL["$CURRENT_STAGE"]="${1:-}"
+  printf '%s[%s]   STAGE %s SKIP%s - %s\n' "$C_YELLOW" "$(ts)" "$CURRENT_STAGE" "$C_RESET" "${1:-}"
+}
+
+die() { printf '%sERROR:%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 2; }
+
+# ------------------------------------------------------------------------------
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --vcenter) VCENTER="${2:?}"; shift 2 ;;
+    --template) TEMPLATE="${2:?}"; shift 2 ;;
+    --name) VM_NAME="${2:?}"; shift 2 ;;
+    --portgroup) PORTGROUP="${2:?}"; shift 2 ;;
+    --datastore) DATASTORE="${2:?}"; shift 2 ;;
+    --mode) MODE="${2:?}"; shift 2 ;;
+    --i-understand-this-destroys-the-template) CONFIRM_DESTROY=1; shift ;;
+    --insecure) INSECURE=--insecure; shift ;;
+    --existing-host) EXISTING_HOST="${2:?}"; shift 2 ;;
+    --components) COMPONENTS="${2:?}"; shift 2 ;;
+    --keep-tools) KEEP_TOOLS=1; shift ;;
+    --keep-vm) KEEP_VM=1; shift ;;
+    --ip-timeout) IP_TIMEOUT="${2:?}"; shift 2 ;;
+    --user) TARGET_SSH_USER="${2:?}"; shift 2 ;;
+    --key) TARGET_SSH_KEY="${2:?}"; shift 2 ;;
+    -h | --help) sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) die "unknown argument: $1" ;;
+  esac
+done
+
+if [[ -z "$EXISTING_HOST" ]]; then
+  [[ -n "$VCENTER" ]] || die "--vcenter is required (or use --existing-host to skip stages 1-3)"
+  [[ -n "$TEMPLATE" ]] || die "--template is required"
+  [[ "$MODE" == "convert" || -n "$VM_NAME" ]] || die "--name is required in clone mode"
+fi
+
+# ------------------------------------------------------------------------------
+# SSH plumbing. Prefer a key; fall back to SSHPASS for fresh templates that
+# only permit password login.
+# ------------------------------------------------------------------------------
+SSH_BASE=(-o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new
+          -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+SSH_WRAP=()
+
+configure_ssh_auth() {
+  if [[ -n "$TARGET_SSH_KEY" ]]; then
+    [[ -r "$TARGET_SSH_KEY" ]] || die "key not readable: $TARGET_SSH_KEY"
+    SSH_BASE+=(-i "$TARGET_SSH_KEY")
+    info "target auth: public key ($TARGET_SSH_KEY)"
+  elif [[ -n "${SSHPASS:-}" ]]; then
+    command -v sshpass >/dev/null || die "SSHPASS is set but sshpass is not installed"
+    # sshpass reads the password from the SSHPASS variable, so it never
+    # appears in the process table.
+    SSH_WRAP=(sshpass -e)
+    SSH_BASE=("${SSH_BASE[@]/-o BatchMode=yes/}")
+    SSH_BASE+=(-o PubkeyAuthentication=no -o PreferredAuthentications=password)
+    info "target auth: password via SSHPASS"
+  else
+    die "no target credentials: set TARGET_SSH_KEY or SSHPASS"
+  fi
+}
+
+rsh() { "${SSH_WRAP[@]}" ssh "${SSH_BASE[@]}" "${TARGET_SSH_USER}@${TARGET_HOST}" "$@"; }
+rsh_in() { "${SSH_WRAP[@]}" ssh "${SSH_BASE[@]}" "${TARGET_SSH_USER}@${TARGET_HOST}" "$@"; }
+
+# Run a command as root on the target, using sudo -n or sudo -S as available.
+rsudo() {
+  if [[ -n "${SSHPASS:-}" && -z "$TARGET_SSH_KEY" ]]; then
+    rsh "sudo -n $* 2>/dev/null || { printf '%s\\n' \"\$SUDOPW\" | sudo -S -p '' $*; }"
+  else
+    rsh "sudo -n $*"
+  fi
+}
+
+summary() {
+  local names=(
+    [1]="connect to vSphere"
+    [2]="find the template"
+    [3]="template -> VM, NIC, power on"
+    [4]="place the scripts"
+    [5]="install the tools"
+    [6]="verify with systemctl"
+    [7]="uninstall the tools"
+    [8]="confirm scripts remain"
+  )
+  printf '\n%s==============================================================================%s\n' "$C_CYAN" "$C_RESET"
+  printf '%s END-TO-END VALIDATION SUMMARY%s\n' "$C_BOLD" "$C_RESET"
+  printf '%s==============================================================================%s\n' "$C_CYAN" "$C_RESET"
+  printf ' %-6s %-34s %-6s %s\n' STAGE DESCRIPTION RESULT DETAIL
+  printf ' %-6s %-34s %-6s %s\n' '-----' '---------------------------------' '------' '--------------------'
+  local i r colour
+  for i in 1 2 3 4 5 6 7 8; do
+    r="${STAGE_RESULT[$i]:-NOT_RUN}"
+    case "$r" in
+      PASS) colour="$C_GREEN" ;;
+      FAIL) colour="$C_RED" ;;
+      SKIP) colour="$C_YELLOW" ;;
+      *) colour="" ;;
+    esac
+    printf ' %-6s %-34s %s%-6s%s %s\n' "$i" "${names[$i]}" "$colour" "$r" "$C_RESET" "${STAGE_DETAIL[$i]:-}"
+  done
+  printf '%s==============================================================================%s\n' "$C_CYAN" "$C_RESET"
+  [[ -n "$TARGET_HOST" ]] && printf ' target: %s   scripts: %s\n' "$TARGET_HOST" "$REMOTE_DIR"
+  printf '\n'
+}
+
+# ==============================================================================
+# Stages 1-3 - vSphere
+# ==============================================================================
+if [[ -n "$EXISTING_HOST" ]]; then
+  TARGET_HOST="$EXISTING_HOST"
+  for s in 1 2 3; do
+    CURRENT_STAGE=$s
+    stage_skip "using existing host ${EXISTING_HOST}"
+  done
+else
+  [[ -n "${VCENTER_USER:-}" && -n "${VCENTER_PASSWORD:-}" ]] \
+    || die "set VCENTER_USER and VCENTER_PASSWORD in the environment"
+
+  stage_begin 1 "CONNECT TO VSPHERE"
+  info "vCenter: ${VCENTER}"
+  info "user:    ${VCENTER_USER}"
+
+  stage_begin 2 "FIND THE TEMPLATE"
+  info "template: ${TEMPLATE}"
+
+  stage_begin 3 "CONVERT TEMPLATE TO VM, CONNECT NIC, POWER ON"
+  [[ "$MODE" == "convert" ]] \
+    && info "mode: CONVERT (destructive - the template will cease to exist)" \
+    || info "mode: clone (template preserved) -> ${VM_NAME}"
+
+  provision_args=(--vcenter "$VCENTER" --template "$TEMPLATE" --mode "$MODE"
+                  --ip-timeout "$IP_TIMEOUT" --folder Templates)
+  [[ -n "$VM_NAME" ]] && provision_args+=(--name "$VM_NAME")
+  [[ -n "$PORTGROUP" ]] && provision_args+=(--portgroup "$PORTGROUP")
+  [[ -n "$DATASTORE" ]] && provision_args+=(--datastore "$DATASTORE")
+  [[ -n "$INSECURE" ]] && provision_args+=("$INSECURE")
+  ((CONFIRM_DESTROY)) && provision_args+=(--i-understand-this-destroys-the-template)
+
+  # stdout carries JSON; stderr carries the staged progress log.
+  if ! result_json="$(python3 "${BASE_DIR}/scripts/vsphere_provision.py" "${provision_args[@]}")"; then
+    rc=$?
+    case $rc in
+      3) CURRENT_STAGE=1; stage_fail "could not connect to vCenter" ;;
+      4) CURRENT_STAGE=2; stage_fail "template not found" ;;
+      *) CURRENT_STAGE=3; stage_fail "provisioning failed (rc=${rc})" ;;
+    esac
+  fi
+
+  CURRENT_STAGE=1; stage_pass "connected to ${VCENTER}"
+  CURRENT_STAGE=2; stage_pass "template ${TEMPLATE} located"
+
+  TARGET_IP="$(python3 -c 'import json,sys;print(json.load(sys.stdin).get("ip") or "")' <<<"$result_json")"
+  created_vm="$(python3 -c 'import json,sys;print(json.load(sys.stdin).get("vm_name") or "")' <<<"$result_json")"
+  guest_os="$(python3 -c 'import json,sys;print(json.load(sys.stdin).get("guest_os") or "")' <<<"$result_json")"
+
+  [[ -n "$TARGET_IP" ]] || { CURRENT_STAGE=3; stage_fail "VM created but no IP was obtained"; }
+  TARGET_HOST="$TARGET_IP"
+  CURRENT_STAGE=3
+  stage_pass "VM ${created_vm} at ${TARGET_IP} (${guest_os})"
+fi
+
+configure_ssh_auth
+
+# ==============================================================================
+# Stage 4 - place the scripts
+# ==============================================================================
+stage_begin 4 "PLACE THE SCRIPTS ON THE TARGET"
+info "target: ${TARGET_SSH_USER}@${TARGET_HOST}"
+
+if ! rsh true 2>/dev/null; then
+  stage_fail "cannot SSH to ${TARGET_HOST}"
+fi
+info "SSH reachable"
+
+remote_os="$(rsh '. /etc/os-release; printf "%s %s %s" "$ID" "${VERSION_ID%%.*}" "$(uname -m)"' 2>/dev/null || true)"
+info "remote platform: ${remote_os}"
+
+info "building a bundle matched to this host"
+bundle="$(mktemp --suffix=.tar.gz)"
+trap 'rm -f "$bundle"' EXIT
+
+if ! SSH_USER="$TARGET_SSH_USER" "${BASE_DIR}/scripts/stage_bundle.sh" \
+      --probe "${TARGET_SSH_USER}@${TARGET_HOST}" --tar >"$bundle" 2>/tmp/e2e_stage.err; then
+  sed 's/^/    /' /tmp/e2e_stage.err
+  stage_fail "bundle staging failed - see the error above"
+fi
+info "bundle: $(du -h "$bundle" | cut -f1)"
+
+rsh "rm -rf ${REMOTE_DIR} && mkdir -p ${REMOTE_DIR}" 2>/dev/null \
+  || stage_fail "cannot create ${REMOTE_DIR} on the target"
+rsh "tar -C ${REMOTE_DIR} -xzf -" <"$bundle" \
+  || stage_fail "failed to extract the bundle on the target"
+
+placed="$(rsh "find ${REMOTE_DIR} -type f | wc -l" 2>/dev/null || echo 0)"
+info "files placed: ${placed}"
+rsh "ls -la ${REMOTE_DIR}" 2>/dev/null | sed 's/^/    /' || true
+
+# Secrets go on their own channel into a 0600 file.
+envfile="$(mktemp)"
+chmod 600 "$envfile"
+{
+  printf 'FALCON_CID=%s\n' "${FALCON_CID:-}"
+  printf 'FALCON_PROVISIONING_TOKEN=%s\n' "${FALCON_PROVISIONING_TOKEN:-}"
+  printf 'CMDBSYNC_PASSWORD=%s\n' "${CMDBSYNC_PASSWORD:-}"
+  printf 'CMDBSYNC_UID=%s\n' "${CMDBSYNC_UID:-2800}"
+  printf 'CMDBSYNC_GID=%s\n' "${CMDBSYNC_GID:-1700}"
+  printf 'AZCM_SP_CLIENT_ID=%s\n' "${AZCM_SP_CLIENT_ID:-}"
+  printf 'AZCM_SP_SECRET=%s\n' "${AZCM_SP_SECRET:-}"
+  printf 'AZCM_SUBSCRIPTION_ID=%s\n' "${AZCM_SUBSCRIPTION_ID:-}"
+  printf 'AZCM_TENANT_ID=%s\n' "${AZCM_TENANT_ID:-}"
+  printf 'AZCM_RESOURCE_GROUP=%s\n' "${AZCM_RESOURCE_GROUP:-}"
+  printf 'AZCM_LOCATION=%s\n' "${AZCM_LOCATION:-eastus2}"
+  printf 'AZCM_CLOUD=%s\n' "${AZCM_CLOUD:-AzureCloud}"
+  printf 'AZCM_TAGS=%s\n' "${AZCM_TAGS:-Environment=Test}"
+  printf 'SYSLOG_SERVER1=%s\n' "${SYSLOG_SERVER1:-10.132.118.100}"
+  printf 'SYSLOG_SERVER2=%s\n' "${SYSLOG_SERVER2:-10.50.118.100}"
+  printf 'SYSLOG_PORT=%s\n' "${SYSLOG_PORT:-514}"
+} >"$envfile"
+rsh "umask 077; cat > ${REMOTE_DIR}/securitytools.env" <"$envfile"
+shred -u "$envfile" 2>/dev/null || rm -f "$envfile"
+info "securitytools.env written with mode 600"
+
+stage_pass "${placed} files placed in ${REMOTE_DIR}"
+
+# ==============================================================================
+# Stage 5 - install
+# ==============================================================================
+stage_begin 5 "INSTALL THE SECURITY TOOLS"
+info "running: sudo ${REMOTE_DIR}/security.sh ${COMPONENTS}"
+echo
+
+install_rc=0
+rsudo "${REMOTE_DIR}/security.sh ${COMPONENTS}" 2>&1 | sed 's/^/    /' || install_rc=$?
+
+echo
+case "$install_rc" in
+  0) stage_pass "every requested component installed" ;;
+  10) STAGE_RESULT[5]=PARTIAL; STAGE_DETAIL[5]="some components failed"
+      printf '%s[%s]   STAGE 5 PARTIAL%s - some components failed\n' "$C_YELLOW" "$(ts)" "$C_RESET" ;;
+  *) stage_fail "install exited ${install_rc}" ;;
+esac
+
+# ==============================================================================
+# Stage 6 - verify with systemctl
+# ==============================================================================
+stage_begin 6 "VERIFY SERVICE STATUS WITH SYSTEMCTL"
+
+echo "    --- systemctl is-active ---"
+for svc in falcon-sensor taniumclient rsyslog; do
+  state="$(rsh "systemctl is-active ${svc} 2>/dev/null || echo not-found" 2>/dev/null || echo unknown)"
+  printf '    %-22s %s\n' "$svc" "$state"
+done
+
+echo
+echo "    --- installed packages ---"
+rsh "rpm -q falcon-sensor TaniumClient rsyslog 2>&1 || true" 2>/dev/null | sed 's/^/    /'
+
+echo
+echo "    --- structured verification ---"
+verify_rc=0
+rsudo "${REMOTE_DIR}/security.sh verify" 2>&1 | sed 's/^/    /' || verify_rc=$?
+
+active_count="$(rsh 'c=0; for s in falcon-sensor taniumclient rsyslog; do systemctl is-active --quiet $s 2>/dev/null && c=$((c+1)); done; echo $c' 2>/dev/null || echo 0)"
+echo
+if [[ "$active_count" -gt 0 ]]; then
+  stage_pass "${active_count} security service(s) active"
+else
+  stage_fail "no security services are active after installation"
+fi
+
+# ==============================================================================
+# Stage 7 - uninstall
+# ==============================================================================
+stage_begin 7 "UNINSTALL THE TOOLS"
+if ((KEEP_TOOLS)); then
+  stage_skip "--keep-tools was supplied"
+else
+  info "running: sudo ${REMOTE_DIR}/uninstall.sh all"
+  echo
+  uninstall_rc=0
+  rsudo "${REMOTE_DIR}/uninstall.sh all" 2>&1 | sed 's/^/    /' || uninstall_rc=$?
+  echo
+
+  echo "    --- post-uninstall systemctl ---"
+  for svc in falcon-sensor taniumclient; do
+    state="$(rsh "systemctl is-active ${svc} 2>/dev/null || echo not-found" 2>/dev/null || echo unknown)"
+    printf '    %-22s %s\n' "$svc" "$state"
+  done
+
+  echo
+  echo "    --- packages remaining ---"
+  remaining="$(rsh 'rpm -q falcon-sensor TaniumClient 2>&1 | grep -c "is not installed" || echo 0' 2>/dev/null || echo 0)"
+  rsh "rpm -q falcon-sensor TaniumClient 2>&1 || true" 2>/dev/null | sed 's/^/    /'
+
+  echo
+  if [[ "$remaining" == "2" ]]; then
+    stage_pass "both agent packages removed"
+  else
+    STAGE_RESULT[7]=PARTIAL
+    STAGE_DETAIL[7]="some packages still present"
+    printf '%s[%s]   STAGE 7 PARTIAL%s - some packages still present\n' "$C_YELLOW" "$(ts)" "$C_RESET"
+  fi
+fi
+
+# ==============================================================================
+# Stage 8 - confirm the scripts survived
+# ==============================================================================
+stage_begin 8 "CONFIRM THE SCRIPTS REMAIN IN ${REMOTE_DIR}"
+
+echo "    --- directory listing ---"
+rsh "ls -la ${REMOTE_DIR} 2>/dev/null" 2>/dev/null | sed 's/^/    /' || true
+
+echo
+missing=0
+for f in security.sh lib/pkg_select.sh sentinel_core.sh uninstall.sh; do
+  if rsh "test -f ${REMOTE_DIR}/${f}" 2>/dev/null; then
+    printf '    %-28s present\n' "$f"
+  else
+    printf '    %-28s %sMISSING%s\n' "$f" "$C_RED" "$C_RESET"
+    missing=$((missing + 1))
+  fi
+done
+
+# The secrets file must not be left behind on a decommissioned test VM.
+if rsh "test -f ${REMOTE_DIR}/securitytools.env" 2>/dev/null; then
+  info "removing securitytools.env from the target"
+  rsh "shred -u ${REMOTE_DIR}/securitytools.env 2>/dev/null || rm -f ${REMOTE_DIR}/securitytools.env" || true
+fi
+
+final_count="$(rsh "find ${REMOTE_DIR} -type f | wc -l" 2>/dev/null || echo 0)"
+echo
+if ((missing == 0)); then
+  stage_pass "all scripts present (${final_count} files) and secrets removed"
+else
+  stage_fail "${missing} expected script(s) missing from ${REMOTE_DIR}"
+fi
+
+summary
+
+failed=0
+for i in 1 2 3 4 5 6 7 8; do
+  [[ "${STAGE_RESULT[$i]:-}" == "FAIL" ]] && failed=$((failed + 1))
+done
+((failed == 0)) || exit 39
+exit 0
