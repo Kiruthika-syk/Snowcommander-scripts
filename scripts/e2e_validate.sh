@@ -31,8 +31,19 @@
 #       --template BLR-Redhat-9 --name e2e-test-rhel9 \
 #       --portgroup 'VM Network' --insecure
 #
+#   # Full round trip on the template itself (no new VM is created):
+#   scripts/e2e_validate.sh --vcenter fw-vsphere-01.strykercorp.com \
+#       --template FW-Redhat-9 --template-cycle \
+#       --portgroup 'fwa-vlan106' --fqdn-domain vcraeng.com --insecure
+#
 #   scripts/e2e_validate.sh ... --existing-host blr-gi-6   # skip stages 1-3
 #   scripts/e2e_validate.sh ... --keep-tools               # skip stage 7
+#   scripts/e2e_validate.sh ... --remote-dir /opt/foo      # script location
+#
+# --template-cycle is shorthand for:
+#     --mode convert --i-understand-this-destroys-the-template
+#     --convert-to-template
+# It converts the template into a VM, validates, then converts it back.
 #
 # Exit codes: 0 all stages passed, 2 usage, 3x stage failure (30+stage number)
 # ==============================================================================
@@ -41,7 +52,14 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REMOTE_DIR="${REMOTE_DIR:-/var/tmp/sectools}"
+
+# Where the scripts live on the target.
+#
+# /opt is the default rather than /var/tmp because these survive into a golden
+# image: systemd-tmpfiles cleans /var/tmp on a schedule (30 days on RHEL), so
+# scripts placed there would silently disappear from a template that sits
+# unused. Override with --remote-dir.
+REMOTE_DIR="${REMOTE_DIR:-/opt/snowcommander}"
 
 VCENTER=""
 TEMPLATE=""
@@ -152,6 +170,17 @@ while [[ $# -gt 0 ]]; do
     --keep-legacy) PURGE_LEGACY=0; shift ;;
     --fqdn-domain) FQDN_DOMAIN="${2:?}"; shift 2 ;;
     --convert-to-template) CONVERT_TO_TEMPLATE=1; shift ;;
+    --remote-dir) REMOTE_DIR="${2:?}"; shift 2 ;;
+    --template-cycle)
+      # Full round trip on the template itself:
+      #   template -> VM -> place -> install -> verify -> uninstall -> template
+      # Naming the flag after the whole cycle makes the destructive middle
+      # step explicit, so no separate acknowledgement flag is required.
+      MODE=convert
+      CONFIRM_DESTROY=1
+      CONVERT_TO_TEMPLATE=1
+      shift
+      ;;
     --ip-timeout) IP_TIMEOUT="${2:?}"; shift 2 ;;
     --user) TARGET_SSH_USER="${2:?}"; shift 2 ;;
     --key) TARGET_SSH_KEY="${2:?}"; shift 2 ;;

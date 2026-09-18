@@ -28,7 +28,9 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REMOTE_DIR="${REMOTE_DIR:-/var/tmp/sectools}"
+# /opt rather than /var/tmp: systemd-tmpfiles cleans /var/tmp on a schedule,
+# which would silently remove the scripts from a long-lived host.
+REMOTE_DIR="${REMOTE_DIR:-/opt/snowcommander}"
 
 MODE=plan
 COMPONENTS=all
