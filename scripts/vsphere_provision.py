@@ -547,6 +547,30 @@ def main() -> int:
     if not args.template:
         fail(RC_USAGE, "--template is required (or use --list-templates)")
 
+    if args.mode == "convert":
+        # A previous run may have converted the template and then failed before
+        # restoring it. Reuse that VM instead of demanding manual cleanup.
+        already = [o for o, p in bulk_fetch(content, content.rootFolder,
+                                            vim.VirtualMachine,
+                                            ["name", "config.template"])
+                   if p.get("name") == args.template and not p.get("config.template")]
+        if already:
+            vm = already[0]
+            path = folder_path(vm)
+            enforce_scope(vm, path)
+            log("2/8 TEMPLATE",
+                f"'{args.template}' is already a virtual machine from an earlier "
+                f"run - reusing it instead of converting again")
+            connect_nic(content, vm, args.portgroup)
+            ip = None if args.no_power_on else power_on_and_wait(vm, args.ip_timeout)
+            print(json.dumps({
+                "vm_name": vm.name, "ip": ip, "mode": args.mode,
+                "template": args.template,
+                "guest_os": vm.config.guestFullName if vm.config else None,
+                "power_state": str(vm.runtime.powerState),
+            }))
+            return RC_OK
+
     template = find_template(content, args.template, args.folder)
 
     if args.mode == "convert":

@@ -117,6 +117,11 @@ declare -A STAGE_DETAIL=()
 CURRENT_STAGE=0
 TARGET_IP=""
 TARGET_HOST=""
+created_vm=""
+# Track the convert/restore round trip so a mid-run failure cannot leave the
+# golden image stranded as a virtual machine.
+TEMPLATE_CONVERTED=0
+FINALIZED=0
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 say() { printf '[%s] %s\n' "$(ts)" "$*"; }
@@ -150,6 +155,27 @@ stage_skip() {
 }
 
 die() { printf '%sERROR:%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 2; }
+
+# If the run ends before finalisation and we converted a template in place,
+# convert it back. Without this, any failure after stage 3 leaves the template
+# as a VM and an operator has to remember to fix it by hand.
+restore_template_on_exit() {
+  local rc=$?
+  if ((CONVERT_TO_TEMPLATE)) && ((TEMPLATE_CONVERTED)) && ((! FINALIZED)); then
+    printf '\n%s[%s] run ended early (rc=%s) - restoring %s to template form%s\n' \
+      "$C_YELLOW" "$(ts)" "$rc" "$created_vm" "$C_RESET"
+    local args=(--vcenter "$VCENTER" --finalize "$created_vm")
+    [[ -n "$INSECURE" ]] && args+=("$INSECURE")
+    if python3 "${BASE_DIR}/scripts/vsphere_provision.py" "${args[@]}" >/dev/null 2>&1; then
+      printf '%s[%s] %s restored to template%s\n' "$C_GREEN" "$(ts)" "$created_vm" "$C_RESET"
+    else
+      printf '%s[%s] AUTOMATIC RESTORE FAILED - convert %s back manually in vCenter%s\n' \
+        "$C_RED" "$(ts)" "$created_vm" "$C_RESET"
+    fi
+  fi
+  return $rc
+}
+trap restore_template_on_exit EXIT
 
 # ------------------------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
@@ -199,26 +225,57 @@ fi
 # SSH plumbing. Prefer a key; fall back to SSHPASS for fresh templates that
 # only permit password login.
 # ------------------------------------------------------------------------------
-SSH_BASE=(-o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new
-          -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+SSH_BASE=()
 SSH_WRAP=()
 
 configure_ssh_auth() {
+  local common=(
+    -o ConnectTimeout=15
+    -o StrictHostKeyChecking=accept-new
+    -o UserKnownHostsFile=/dev/null
+    -o LogLevel=ERROR
+  )
+
   if [[ -n "$TARGET_SSH_KEY" ]]; then
     [[ -r "$TARGET_SSH_KEY" ]] || die "key not readable: $TARGET_SSH_KEY"
-    SSH_BASE+=(-i "$TARGET_SSH_KEY")
+    SSH_BASE=(-o BatchMode=yes "${common[@]}" -i "$TARGET_SSH_KEY")
     info "target auth: public key ($TARGET_SSH_KEY)"
   elif [[ -n "${SSHPASS:-}" ]]; then
     command -v sshpass >/dev/null || die "SSHPASS is set but sshpass is not installed"
-    # sshpass reads the password from the SSHPASS variable, so it never
-    # appears in the process table.
+    # BatchMode must NOT be set here. It suppresses password prompting
+    # entirely, which is exactly what sshpass needs in order to answer.
+    SSH_BASE=("${common[@]}"
+              -o PubkeyAuthentication=no
+              -o PreferredAuthentications=password
+              -o NumberOfPasswordPrompts=1)
+    # sshpass reads the password from $SSHPASS, so it never reaches the
+    # process table.
     SSH_WRAP=(sshpass -e)
-    SSH_BASE=("${SSH_BASE[@]/-o BatchMode=yes/}")
-    SSH_BASE+=(-o PubkeyAuthentication=no -o PreferredAuthentications=password)
     info "target auth: password via SSHPASS"
   else
     die "no target credentials: set TARGET_SSH_KEY or SSHPASS"
   fi
+}
+
+# Report why a connection failed instead of just that it did.
+diagnose_ssh() {
+  local host="$1" out
+  info "diagnosing the SSH failure"
+  if ! timeout 8 bash -c "</dev/tcp/${host}/22" 2>/dev/null; then
+    info "  port 22 is not accepting connections (sshd down, or firewalled)"
+    return
+  fi
+  info "  port 22 is open"
+  out="$("${SSH_WRAP[@]}" ssh "${SSH_BASE[@]}" -o ConnectTimeout=10 \
+        "${TARGET_SSH_USER}@${host}" true 2>&1 || true)"
+  [[ -n "$out" ]] && printf '      %s\n' "$out" | head -5
+  case "$out" in
+    *"Permission denied"*)
+      info "  authentication rejected - wrong password, or the account does not exist"
+      info "  check: does '${TARGET_SSH_USER}' exist on this template?" ;;
+    *"Connection refused"*) info "  sshd is not listening" ;;
+    *"Too many authentication failures"*) info "  server rejected the attempt sequence" ;;
+  esac
 }
 
 rsh() { "${SSH_WRAP[@]}" ssh "${SSH_BASE[@]}" "${TARGET_SSH_USER}@${TARGET_HOST}" "$@"; }
@@ -327,6 +384,8 @@ else
 
   [[ -n "$TARGET_IP" ]] || { CURRENT_STAGE=3; stage_fail "VM created but no IP was obtained"; }
   TARGET_HOST="$TARGET_IP"
+  # From here on a failure must restore the template, so arm the EXIT trap.
+  [[ "$MODE" == "convert" ]] && TEMPLATE_CONVERTED=1
   CURRENT_STAGE=3
   stage_pass "VM ${created_vm} at ${TARGET_IP} (${guest_os})"
 fi
@@ -340,7 +399,8 @@ stage_begin 4 "PLACE THE SCRIPTS ON THE TARGET"
 info "target: ${TARGET_SSH_USER}@${TARGET_HOST}"
 
 if ! rsh true 2>/dev/null; then
-  stage_fail "cannot SSH to ${TARGET_HOST}"
+  diagnose_ssh "$TARGET_HOST"
+  stage_fail "cannot SSH to ${TARGET_HOST} as ${TARGET_SSH_USER}"
 fi
 info "SSH reachable"
 
@@ -654,6 +714,7 @@ if ((CONVERT_TO_TEMPLATE)); then
     [[ -n "$INSECURE" ]] && finalize_args+=("$INSECURE")
 
     if python3 "${BASE_DIR}/scripts/vsphere_provision.py" "${finalize_args[@]}"; then
+      FINALIZED=1
       printf '%s[%s]   FINALISE PASS%s - %s is now a template\n' \
         "$C_GREEN" "$(ts)" "$C_RESET" "$created_vm"
     else
