@@ -77,6 +77,11 @@ IP_TIMEOUT=300
 SSH_WAIT="${SSH_WAIT:-120}"
 COMPONENTS=all
 
+# Which components stage 7 tears down. The three agents are removed; the
+# cmdbsync account and the Red Hat subscription are deliberately retained,
+# so the resulting template keeps its CMDB identity and entitlement.
+UNINSTALL_COMPONENTS="${UNINSTALL_COMPONENTS:-tanium crowdstrike sentinel}"
+
 # RHSM handling:
 #   auto    infer from the template/guest - Red Hat templates keep the
 #           subscription, GI/Vocera appliance templates are unregistered again
@@ -211,6 +216,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --ip-timeout) IP_TIMEOUT="${2:?}"; shift 2 ;;
     --ssh-wait) SSH_WAIT="${2:?}"; shift 2 ;;
+    --uninstall-components) UNINSTALL_COMPONENTS="${2:?}"; shift 2 ;;
     --user) TARGET_SSH_USER="${2:?}"; shift 2 ;;
     --key) TARGET_SSH_KEY="${2:?}"; shift 2 ;;
     -h | --help) sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -633,6 +639,30 @@ echo "    --- installed packages ---"
 rsh "rpm -q falcon-sensor TaniumClient rsyslog 2>&1 || true" 2>/dev/null | sed 's/^/    /'
 
 echo
+echo "    --- Tanium ---"
+rsh "rpm -q TaniumClient 2>&1; systemctl is-enabled taniumclient 2>/dev/null || true" 2>/dev/null | sed 's/^/    /'
+
+echo
+echo "    --- CrowdStrike CID and agent ID ---"
+# The CID is an identifier, not a credential, so it is safe to display.
+rsudo "/opt/CrowdStrike/falconctl -g --cid --aid 2>&1 || true" 2>/dev/null | sed 's/^/    /'
+
+echo
+echo "    --- Azure Arc connection state ---"
+rsh "command -v azcmagent >/dev/null 2>&1 && (azcmagent show 2>&1 | head -12) || echo 'azcmagent not installed'" \
+  2>/dev/null | sed 's/^/    /'
+
+echo
+echo "    --- CMDB sync account ---"
+rsh "id cmdbsync 2>&1 || echo 'cmdbsync user absent'" 2>/dev/null | sed 's/^/    /'
+rsudo "visudo -cf /etc/sudoers.d/cmdbsync 2>&1 || echo 'sudoers policy missing or invalid'" \
+  2>/dev/null | sed 's/^/    /'
+
+echo
+echo "    --- Red Hat subscription ---"
+rsudo "subscription-manager identity 2>&1 | head -4 || true" 2>/dev/null | sed 's/^/    /'
+
+echo
 echo "    --- structured verification ---"
 verify_rc=0
 rsudo "${REMOTE_DIR}/security.sh verify" 2>&1 | sed 's/^/    /' || verify_rc=$?
@@ -665,10 +695,11 @@ stage_begin 7 "UNINSTALL THE TOOLS"
 if ((KEEP_TOOLS)); then
   stage_skip "--keep-tools was supplied"
 else
-  info "running: sudo ${REMOTE_DIR}/uninstall.sh all"
+  info "removing: ${UNINSTALL_COMPONENTS}"
+  info "retaining: cmdbsync account and Red Hat subscription"
   echo
   uninstall_rc=0
-  rsudo "${REMOTE_DIR}/uninstall.sh all" 2>&1 | sed 's/^/    /' || uninstall_rc=$?
+  rsudo "${REMOTE_DIR}/uninstall.sh ${UNINSTALL_COMPONENTS}" 2>&1 | sed 's/^/    /' || uninstall_rc=$?
   echo
 
   echo "    --- post-uninstall systemctl ---"
@@ -678,17 +709,45 @@ else
   done
 
   echo
-  echo "    --- packages remaining ---"
+  echo "    --- agent packages remaining ---"
   remaining="$(rsh 'rpm -q falcon-sensor TaniumClient 2>&1 | grep -c "is not installed" || echo 0' 2>/dev/null || echo 0)"
   rsh "rpm -q falcon-sensor TaniumClient 2>&1 || true" 2>/dev/null | sed 's/^/    /'
 
   echo
-  if [[ "$remaining" == "2" ]]; then
-    stage_pass "both agent packages removed"
+  echo "    --- azcmagent removed? ---"
+  rsh "command -v azcmagent >/dev/null 2>&1 && echo 'still present' || echo 'removed'" \
+    2>/dev/null | sed 's/^/    /'
+
+  # The point of a partial teardown is that these two SURVIVE. Prove it
+  # rather than assuming uninstall.sh respected the component list.
+  echo
+  echo "    --- RETAINED: cmdbsync account ---"
+  retained_cmdb=0
+  if rsh 'id cmdbsync' 2>/dev/null | sed 's/^/    /'; then
+    retained_cmdb=1
+  else
+    printf '    %sMISSING - cmdbsync was removed unexpectedly%s\n' "$C_RED" "$C_RESET"
+  fi
+
+  echo
+  echo "    --- RETAINED: Red Hat subscription ---"
+  retained_sub=0
+  if rsudo 'subscription-manager identity 2>&1 | head -3' 2>/dev/null | sed 's/^/    /'; then
+    rsudo 'subscription-manager identity >/dev/null 2>&1' 2>/dev/null && retained_sub=1
+  fi
+  ((retained_sub)) || printf '    %sNOT REGISTERED - subscription was lost%s\n' "$C_YELLOW" "$C_RESET"
+
+  echo
+  if [[ "$remaining" == "2" ]] && ((retained_cmdb)); then
+    stage_pass "agents removed; cmdbsync and subscription retained"
+  elif [[ "$remaining" != "2" ]]; then
+    STAGE_RESULT[7]=PARTIAL
+    STAGE_DETAIL[7]="some agent packages still present"
+    printf '%s[%s]   STAGE 7 PARTIAL%s - some agent packages still present\n' "$C_YELLOW" "$(ts)" "$C_RESET"
   else
     STAGE_RESULT[7]=PARTIAL
-    STAGE_DETAIL[7]="some packages still present"
-    printf '%s[%s]   STAGE 7 PARTIAL%s - some packages still present\n' "$C_YELLOW" "$(ts)" "$C_RESET"
+    STAGE_DETAIL[7]="agents removed but cmdbsync did not survive"
+    printf '%s[%s]   STAGE 7 PARTIAL%s - cmdbsync should have been retained\n' "$C_YELLOW" "$(ts)" "$C_RESET"
   fi
 fi
 
