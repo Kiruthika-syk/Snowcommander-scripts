@@ -69,6 +69,13 @@ RHSM_APPLIED=0
 # Legacy payloads baked into the templates. These carry superseded scripts and,
 # in at least one case, a truncated Falcon RPM that fails to install. They are
 # removed so nobody runs them by hand after the new bundle lands.
+# Append an FQDN entry to /etc/hosts on the target. The clone keeps the
+# template's own hostname and IP because no guest customization is applied,
+# so this only makes the fully-qualified name resolvable.
+FQDN_DOMAIN=""
+# Convert the VM back into a template once validation and teardown finish.
+CONVERT_TO_TEMPLATE=0
+
 PURGE_LEGACY=1
 LEGACY_PATHS=(
   '$HOME/2026snowcommander'
@@ -143,6 +150,8 @@ while [[ $# -gt 0 ]]; do
     --keep-vm) KEEP_VM=1; shift ;;
     --rhsm-mode) RHSM_MODE="${2:?}"; shift 2 ;;
     --keep-legacy) PURGE_LEGACY=0; shift ;;
+    --fqdn-domain) FQDN_DOMAIN="${2:?}"; shift 2 ;;
+    --convert-to-template) CONVERT_TO_TEMPLATE=1; shift ;;
     --ip-timeout) IP_TIMEOUT="${2:?}"; shift 2 ;;
     --user) TARGET_SSH_USER="${2:?}"; shift 2 ;;
     --key) TARGET_SSH_KEY="${2:?}"; shift 2 ;;
@@ -395,6 +404,38 @@ rsh "umask 077; cat > ${REMOTE_DIR}/securitytools.env" <"$envfile"
 shred -u "$envfile" 2>/dev/null || rm -f "$envfile"
 info "securitytools.env written with mode 600"
 
+# --- FQDN entry in /etc/hosts -------------------------------------------------
+# The clone inherits the template's hostname and IP because no guest
+# customization is applied. This makes <hostname>.<domain> resolve locally
+# without renaming the host.
+if [[ -n "$FQDN_DOMAIN" ]]; then
+  echo
+  info "configuring ${FQDN_DOMAIN} FQDN in /etc/hosts"
+  host_short="$(rsh 'hostname -s' 2>/dev/null || true)"
+  host_ip="$(rsh "ip -4 route get 1.1.1.1 2>/dev/null | awk '{print \$7; exit}'" 2>/dev/null || true)"
+  [[ -n "$host_ip" ]] || host_ip="$TARGET_HOST"
+
+  if [[ -z "$host_short" ]]; then
+    info "WARNING: could not read the hostname; skipping /etc/hosts"
+  else
+    host_fqdn="${host_short}.${FQDN_DOMAIN}"
+    info "hostname=${host_short}  ip=${host_ip}  fqdn=${host_fqdn}"
+
+    # Back up, drop any stale line for this host, append the canonical entry.
+    rsudo "cp -a /etc/hosts /etc/hosts.sectools-bak.\$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+    rsudo "sh -c \"grep -vE '(^|[[:space:]])${host_short}([[:space:]]|\\\$)' /etc/hosts > /tmp/.hosts.new; \
+                   printf '%s\\t%s %s\\n' '${host_ip}' '${host_fqdn}' '${host_short}' >> /tmp/.hosts.new; \
+                   install -o root -g root -m 644 /tmp/.hosts.new /etc/hosts; rm -f /tmp/.hosts.new\"" \
+      2>/dev/null || info "WARNING: could not update /etc/hosts"
+
+    echo "    --- /etc/hosts ---"
+    rsh 'cat /etc/hosts' 2>/dev/null | sed 's/^/      /' || true
+    resolved="$(rsh 'hostname -f' 2>/dev/null || true)"
+    info "hostname -f now reports: ${resolved:-unknown}"
+  fi
+  echo
+fi
+
 stage_pass "${placed} files placed in ${REMOTE_DIR}"
 
 # ==============================================================================
@@ -564,6 +605,33 @@ if ((missing == 0)); then
   stage_pass "all scripts present (${final_count} files) and secrets removed"
 else
   stage_fail "${missing} expected script(s) missing from ${REMOTE_DIR}"
+fi
+
+# ==============================================================================
+# Optional finalisation - turn the validated, cleaned VM back into a template
+# ==============================================================================
+if ((CONVERT_TO_TEMPLATE)); then
+  printf '\n%s==============================================================================%s\n' "$C_CYAN" "$C_RESET"
+  printf '%s FINALISE - CONVERT THE VM BACK INTO A TEMPLATE%s\n' "$C_BOLD" "$C_RESET"
+  printf '%s==============================================================================%s\n' "$C_CYAN" "$C_RESET"
+
+  if [[ -n "$EXISTING_HOST" ]]; then
+    info "skipped: --existing-host was used, so no VM was created here"
+  elif [[ -z "${created_vm:-}" ]]; then
+    info "skipped: no VM name recorded"
+  else
+    info "shutting down and converting '${created_vm}' to a template"
+    finalize_args=(--vcenter "$VCENTER" --finalize "$created_vm")
+    [[ -n "$INSECURE" ]] && finalize_args+=("$INSECURE")
+
+    if python3 "${BASE_DIR}/scripts/vsphere_provision.py" "${finalize_args[@]}"; then
+      printf '%s[%s]   FINALISE PASS%s - %s is now a template\n' \
+        "$C_GREEN" "$(ts)" "$C_RESET" "$created_vm"
+    else
+      printf '%s[%s]   FINALISE FAIL%s - conversion failed; the VM is left in place\n' \
+        "$C_RED" "$(ts)" "$C_RESET"
+    fi
+  fi
 fi
 
 summary

@@ -361,6 +361,52 @@ def clone_template(content, template, new_name, datastore=None, folder=None,
     return vm
 
 
+def finalize_as_template(content, vm_name: str, force_off: bool = True):
+    """Power off a VM and convert it back into a template.
+
+    Used at the end of the validation cycle so the tested, cleaned machine
+    becomes a golden image. MarkAsTemplate requires the VM to be powered off.
+    """
+    matches = [o for o, p in bulk_fetch(content, content.rootFolder,
+                                        vim.VirtualMachine, ["name"])
+               if p.get("name") == vm_name]
+    if not matches:
+        fail(RC_NOTFOUND, f"VM '{vm_name}' not found")
+    vm = matches[0]
+
+    path = folder_path(vm)
+    enforce_scope(vm, path)
+
+    if vm.config and vm.config.template:
+        log("9/9 TEMPLATE", f"'{vm_name}' is already a template")
+        return vm
+
+    if vm.runtime.powerState != vim.VirtualMachinePowerState.poweredOff:
+        if not force_off:
+            fail(RC_CLONE, f"'{vm_name}' is powered on; MarkAsTemplate needs it off")
+        log("9/9 TEMPLATE", "shutting the guest down cleanly")
+        try:
+            vm.ShutdownGuest()
+            deadline = time.time() + 180
+            while time.time() < deadline:
+                if vm.runtime.powerState == vim.VirtualMachinePowerState.poweredOff:
+                    break
+                time.sleep(5)
+        except Exception:  # noqa: BLE001
+            log("9/9 TEMPLATE", "guest shutdown unavailable (VMware Tools?)")
+        if vm.runtime.powerState != vim.VirtualMachinePowerState.poweredOff:
+            log("9/9 TEMPLATE", "forcing power off")
+            wait_task(vm.PowerOffVM_Task(), "power off")
+    log("9/9 TEMPLATE", "powered off")
+
+    try:
+        vm.MarkAsTemplate()
+    except Exception as exc:  # noqa: BLE001
+        fail(RC_CLONE, f"MarkAsTemplate failed: {exc}")
+    log("9/9 TEMPLATE", f"'{vm_name}' is now a template in {path}")
+    return vm
+
+
 def convert_template(template):
     log("3/8 PROVISION",
         f"CONVERTING '{template.name}' in place - it will NO LONGER be a template")
@@ -458,6 +504,8 @@ def main() -> int:
     p.add_argument("--list-templates", action="store_true")
     p.add_argument("--list-folders", action="store_true",
                    help="print the VM folder hierarchy to discover the real layout")
+    p.add_argument("--finalize", metavar="VM_NAME",
+                   help="power off VM_NAME and convert it back into a template")
     p.add_argument("--insecure", action="store_true",
                    help="skip TLS verification (common for internal vCenters)")
     p.add_argument("--ip-timeout", type=int, default=300)
@@ -484,6 +532,12 @@ def main() -> int:
 
     if args.list_folders:
         list_folders(content, args.folder)
+        return RC_OK
+
+    if args.finalize:
+        vm = finalize_as_template(content, args.finalize)
+        print(json.dumps({"vm_name": args.finalize, "template": True,
+                          "folder": folder_path(vm)}))
         return RC_OK
 
     if args.list_templates:
