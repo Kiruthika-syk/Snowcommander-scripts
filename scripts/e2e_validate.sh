@@ -66,6 +66,17 @@ COMPONENTS=all
 RHSM_MODE=auto
 RHSM_APPLIED=0
 
+# Legacy payloads baked into the templates. These carry superseded scripts and,
+# in at least one case, a truncated Falcon RPM that fails to install. They are
+# removed so nobody runs them by hand after the new bundle lands.
+PURGE_LEGACY=1
+LEGACY_PATHS=(
+  '$HOME/2026snowcommander'
+  '/home/tpx-admin/2026snowcommander'
+  '/root/2026snowcommander'
+  '/opt/2026snowcommander'
+)
+
 TARGET_SSH_USER="${TARGET_SSH_USER:-tpx-admin}"
 TARGET_SSH_KEY="${TARGET_SSH_KEY:-}"
 
@@ -131,6 +142,7 @@ while [[ $# -gt 0 ]]; do
     --keep-tools) KEEP_TOOLS=1; shift ;;
     --keep-vm) KEEP_VM=1; shift ;;
     --rhsm-mode) RHSM_MODE="${2:?}"; shift 2 ;;
+    --keep-legacy) PURGE_LEGACY=0; shift ;;
     --ip-timeout) IP_TIMEOUT="${2:?}"; shift 2 ;;
     --user) TARGET_SSH_USER="${2:?}"; shift 2 ;;
     --key) TARGET_SSH_KEY="${2:?}"; shift 2 ;;
@@ -286,6 +298,45 @@ info "SSH reachable"
 
 remote_os="$(rsh '. /etc/os-release; printf "%s %s %s" "$ID" "${VERSION_ID%%.*}" "$(uname -m)"' 2>/dev/null || true)"
 info "remote platform: ${remote_os}"
+
+# --- remove superseded payloads baked into the template -----------------------
+if ((PURGE_LEGACY)); then
+  echo
+  info "checking for legacy deployment folders"
+  purged=0
+  for legacy in "${LEGACY_PATHS[@]}"; do
+    # The path is evaluated remotely so $HOME resolves to the target's user.
+    if ! rsh "test -d ${legacy}" 2>/dev/null; then
+      continue
+    fi
+    resolved="$(rsh "cd ${legacy} && pwd" 2>/dev/null || echo "$legacy")"
+    count="$(rsh "find ${legacy} -type f 2>/dev/null | wc -l" 2>/dev/null || echo '?')"
+    size="$(rsh "du -sh ${legacy} 2>/dev/null | cut -f1" 2>/dev/null || echo '?')"
+    info "found ${resolved} (${count} files, ${size})"
+
+    # Record what was there before removing it, so the log is auditable.
+    rsh "ls -la ${legacy} 2>/dev/null | head -25" 2>/dev/null | sed 's/^/      /' || true
+
+    if rsudo "rm -rf ${legacy}" 2>/dev/null; then
+      if rsh "test -d ${legacy}" 2>/dev/null; then
+        info "WARNING: ${resolved} still present after removal"
+      else
+        info "removed ${resolved}"
+        purged=$((purged + 1))
+      fi
+    else
+      info "WARNING: could not remove ${resolved}"
+    fi
+  done
+  if ((purged == 0)); then
+    info "no legacy folders present"
+  else
+    info "${purged} legacy folder(s) removed"
+  fi
+else
+  info "--keep-legacy: leaving any existing 2026snowcommander folder in place"
+fi
+echo
 
 info "building a bundle matched to this host"
 bundle="$(mktemp --suffix=.tar.gz)"

@@ -185,6 +185,18 @@ deploy_one_host() {
     return 1
   fi
 
+  # Remove superseded payloads baked into older templates before placing the
+  # new bundle, so nobody runs the stale scripts by hand afterwards.
+  if [[ "${PURGE_LEGACY:-1}" == "1" ]]; then
+    for legacy in '$HOME/2026snowcommander' /home/tpx-admin/2026snowcommander /opt/2026snowcommander; do
+      if ssh "${SSH_OPTS[@]}" "$target" "test -d ${legacy}" 2>/dev/null; then
+        ssh "${SSH_OPTS[@]}" "$target" "sudo -n rm -rf ${legacy}" 2>>"$logf" \
+          && echo "removed legacy ${legacy}" >>"$logf" \
+          || echo "WARNING could not remove ${legacy}" >>"$logf"
+      fi
+    done
+  fi
+
   ssh "${SSH_OPTS[@]}" "$target" \
     "rm -rf ${REMOTE_DIR} && mkdir -p ${REMOTE_DIR}" 2>>"$logf"
   ssh "${SSH_OPTS[@]}" "$target" \
