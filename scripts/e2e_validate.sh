@@ -73,6 +73,8 @@ EXISTING_HOST=""
 KEEP_TOOLS=0
 KEEP_VM=0
 IP_TIMEOUT=300
+# sshd often starts after VMware Tools first reports an address.
+SSH_WAIT="${SSH_WAIT:-120}"
 COMPONENTS=all
 
 # RHSM handling:
@@ -208,6 +210,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --ip-timeout) IP_TIMEOUT="${2:?}"; shift 2 ;;
+    --ssh-wait) SSH_WAIT="${2:?}"; shift 2 ;;
     --user) TARGET_SSH_USER="${2:?}"; shift 2 ;;
     --key) TARGET_SSH_KEY="${2:?}"; shift 2 ;;
     -h | --help) sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -398,9 +401,27 @@ configure_ssh_auth
 stage_begin 4 "PLACE THE SCRIPTS ON THE TARGET"
 info "target: ${TARGET_SSH_USER}@${TARGET_HOST}"
 
-if ! rsh true 2>/dev/null; then
+# VMware Tools can report an IP before sshd finishes starting, so poll rather
+# than judging on a single immediate attempt.
+info "waiting up to ${SSH_WAIT}s for SSH on ${TARGET_HOST}"
+ssh_ok=0
+ssh_deadline=$((SECONDS + SSH_WAIT))
+port_seen=0
+while ((SECONDS < ssh_deadline)); do
+  if ((! port_seen)) && timeout 5 bash -c "</dev/tcp/${TARGET_HOST}/22" 2>/dev/null; then
+    port_seen=1
+    info "port 22 is open"
+  fi
+  if rsh true 2>/dev/null; then
+    ssh_ok=1
+    break
+  fi
+  sleep 5
+done
+
+if ((! ssh_ok)); then
   diagnose_ssh "$TARGET_HOST"
-  stage_fail "cannot SSH to ${TARGET_HOST} as ${TARGET_SSH_USER}"
+  stage_fail "cannot SSH to ${TARGET_HOST} as ${TARGET_SSH_USER} after ${SSH_WAIT}s"
 fi
 info "SSH reachable"
 
