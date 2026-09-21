@@ -85,6 +85,21 @@ COMPONENTS=all
 # so the resulting template keeps its CMDB identity and entitlement.
 UNINSTALL_COMPONENTS="${UNINSTALL_COMPONENTS:-tanium crowdstrike sentinel}"
 
+# What happens to securitytools.env when the run finishes.
+#
+#   sanitize (default)  keep the file with every non-secret value populated,
+#                       but blank the four real credentials. A clone then has
+#                       complete configuration and only needs secrets injected.
+#   keep                leave the file intact, credentials included. A clone is
+#                       immediately self-sufficient, at the cost of shipping
+#                       credentials inside every machine built from the template.
+#   shred               destroy the file entirely.
+ENV_DISPOSITION="${ENV_DISPOSITION:-sanitize}"
+
+# The only values that are genuinely credentials. Everything else in
+# securitytools.env is an identifier or plain configuration.
+SECRET_ENV_KEYS=(AZCM_SP_SECRET CMDBSYNC_PASSWORD RHSM_PASSWORD FALCON_PROVISIONING_TOKEN)
+
 # RHSM handling:
 #   auto    infer from the template/guest - Red Hat templates keep the
 #           subscription, GI/Vocera appliance templates are unregistered again
@@ -230,6 +245,8 @@ while [[ $# -gt 0 ]]; do
     --ip-timeout) IP_TIMEOUT="${2:?}"; shift 2 ;;
     --ssh-wait) SSH_WAIT="${2:?}"; shift 2 ;;
     --uninstall-components) UNINSTALL_COMPONENTS="${2:?}"; shift 2 ;;
+    --env-disposition) ENV_DISPOSITION="${2:?}"; shift 2 ;;
+    --keep-secrets) ENV_DISPOSITION=keep; shift ;;
     --user) TARGET_SSH_USER="${2:?}"; shift 2 ;;
     --key) TARGET_SSH_KEY="${2:?}"; shift 2 ;;
     -h | --help) sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -836,11 +853,86 @@ for f in security.sh lib/pkg_select.sh sentinel_core.sh uninstall.sh; do
   fi
 done
 
-# The secrets file must not be left behind on a decommissioned test VM.
-if rsh "test -f ${REMOTE_DIR}/securitytools.env" 2>/dev/null; then
-  info "removing securitytools.env from the target"
-  rsh "shred -u ${REMOTE_DIR}/securitytools.env 2>/dev/null || rm -f ${REMOTE_DIR}/securitytools.env" || true
-fi
+# Decide what securitytools.env looks like on the finished template.
+echo
+case "$ENV_DISPOSITION" in
+  keep)
+    info "securitytools.env: KEEPING credentials on the template"
+    info "  every VM cloned from this template will carry them on disk"
+    ;;
+
+  shred)
+    if rsh "test -f ${REMOTE_DIR}/securitytools.env" 2>/dev/null; then
+      info "securitytools.env: destroying it"
+      rsh "shred -u ${REMOTE_DIR}/securitytools.env 2>/dev/null \
+           || rm -f ${REMOTE_DIR}/securitytools.env" || true
+    fi
+    ;;
+
+  sanitize)
+    info "securitytools.env: keeping configuration, blanking credentials"
+    sanitized="$(mktemp)"
+    chmod 600 "$sanitized"
+    {
+      cat <<'HDR'
+# Configuration for the security tooling installer.
+#
+# Every non-secret value below is populated and ready to use. The credentials
+# are intentionally blank: this file ships inside a VM template, so anything
+# written here would be copied into every machine cloned from it.
+#
+# Supply the blank values at deploy time, by whichever route suits you:
+#
+#   1. Environment variables, which take precedence over this file:
+#        AZCM_SP_SECRET='...' CMDBSYNC_PASSWORD='...' RHSM_PASSWORD='...' \
+#          sudo -E ./security.sh all
+#
+#   2. A secrets manager at first boot, for example CyberArk:
+#        AZCM_SP_SECRET="$(cyberark_secret.py --object azure-sp)"
+#
+#   3. Edit this file in place on the running VM, then remove the values again.
+#
+HDR
+      printf 'FALCON_CID=%s\n'            "${FALCON_CID:-}"
+      printf 'CMDBSYNC_UID=%s\n'          "${CMDBSYNC_UID:-2800}"
+      printf 'CMDBSYNC_GID=%s\n'          "${CMDBSYNC_GID:-1700}"
+      printf 'AZCM_SP_CLIENT_ID=%s\n'     "${AZCM_SP_CLIENT_ID:-}"
+      printf 'AZCM_SUBSCRIPTION_ID=%s\n'  "${AZCM_SUBSCRIPTION_ID:-}"
+      printf 'AZCM_TENANT_ID=%s\n'        "${AZCM_TENANT_ID:-}"
+      printf 'AZCM_RESOURCE_GROUP=%s\n'   "${AZCM_RESOURCE_GROUP:-}"
+      printf 'AZCM_LOCATION=%s\n'         "${AZCM_LOCATION:-eastus2}"
+      printf 'AZCM_CLOUD=%s\n'            "${AZCM_CLOUD:-AzureCloud}"
+      printf 'AZCM_TAGS=%s\n'             "${AZCM_TAGS:-Environment=Production}"
+      printf 'RHSM_USERNAME=%s\n'         "${RHSM_USERNAME:-}"
+      printf 'SYSLOG_SERVER1=%s\n'        "${SYSLOG_SERVER1:-10.132.118.100}"
+      printf 'SYSLOG_SERVER2=%s\n'        "${SYSLOG_SERVER2:-10.50.118.100}"
+      printf 'SYSLOG_PORT=%s\n'           "${SYSLOG_PORT:-514}"
+      echo
+      echo '# --- supply these at deploy time -------------------------------'
+      for secret_key in "${SECRET_ENV_KEYS[@]}"; do
+        printf '%s=\n' "$secret_key"
+      done
+    } >"$sanitized"
+
+    rsh "umask 077; cat > ${REMOTE_DIR}/securitytools.env" <"$sanitized" \
+      || info "WARNING: could not rewrite securitytools.env"
+    shred -u "$sanitized" 2>/dev/null || rm -f "$sanitized"
+
+    # Prove no credential survived the rewrite.
+    leaked=0
+    for secret_key in "${SECRET_ENV_KEYS[@]}"; do
+      if rsh "grep -qE '^${secret_key}=.+' ${REMOTE_DIR}/securitytools.env" 2>/dev/null; then
+        info "WARNING: ${secret_key} still has a value in securitytools.env"
+        leaked=1
+      fi
+    done
+    ((leaked)) || info "verified: no credential values remain in securitytools.env"
+    ;;
+
+  *)
+    info "WARNING: unknown --env-disposition '${ENV_DISPOSITION}', leaving the file untouched"
+    ;;
+esac
 
 final_count="$(rsh "find ${REMOTE_DIR} -type f | wc -l" 2>/dev/null || echo 0)"
 echo
