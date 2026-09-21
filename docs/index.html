@@ -68,6 +68,27 @@
   .flow{font-family:var(--mono);font-size:12px;line-height:1.55;background:#0b0d11;
         border:1px solid var(--line);border-radius:6px;padding:18px;overflow-x:auto;color:#aab4c4;margin:16px 0}
 
+  /* architecture flowcharts */
+  .arch-lanes{display:grid;grid-template-columns:1fr;gap:14px;margin:16px 0}
+  @media(min-width:760px){.arch-lanes{grid-template-columns:1fr 52px 1fr}}
+  .lane{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px}
+  .lane-title{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);
+              margin:0 0 12px;font-weight:600}
+  .lane-sub{font-size:12px;color:var(--faint);margin:-8px 0 12px}
+  .node{border:1px solid var(--line);border-radius:6px;padding:10px 12px;margin:0 0 10px;background:var(--panel2)}
+  .node:last-child{margin-bottom:0}
+  .node b{display:block;font-family:var(--mono);font-size:13px;color:var(--fg);margin-bottom:4px}
+  .node span{font-size:12px;color:var(--dim);line-height:1.45;display:block}
+  .node .tech{font-size:11px;color:var(--faint);margin-top:6px}
+  .arrow-col{display:flex;align-items:center;justify-content:center;color:var(--faint);font-size:22px;padding:8px 0}
+  @media(min-width:760px){.arrow-col{writing-mode:vertical-rl;transform:rotate(180deg);font-size:18px}}
+  .flow-row{display:flex;flex-wrap:wrap;gap:8px;align-items:stretch;margin:14px 0}
+  .flow-box{flex:1 1 140px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;
+            padding:10px 12px;text-align:center;min-width:120px}
+  .flow-box b{font-family:var(--mono);font-size:12px;display:block;color:var(--accent)}
+  .flow-box small{font-size:11px;color:var(--dim)}
+  .flow-arrow{align-self:center;color:var(--faint);font-size:18px;padding:0 2px}
+
   .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:12px;margin:16px 0}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:14px 16px}
   .card h4{margin:0 0 5px;font-size:13.5px;color:var(--fg)}
@@ -96,12 +117,14 @@
   <a href="#does">What it does</a>
   <a href="#why">Why not containerize agents</a>
   <a href="#stack">Tech stack</a>
-  <a href="#arch">Architecture</a>
+  <a href="#arch">System diagram</a>
   <a href="#flow">End-to-end flow</a>
   <a href="#mechanism">Mechanism</a>
   <div class="grp">Reference</div>
   <a href="#scripts">Scripts</a>
+  <a href="#cpu-arch">CPU architecture</a>
   <a href="#packages">Package selection</a>
+  <a href="#templates">vSphere templates</a>
   <a href="#creds">Credentials</a>
   <a href="#rhsm">Subscriptions</a>
   <div class="grp">Run it</div>
@@ -198,31 +221,141 @@ containerized copy would report the container instead of the VM:</p>
 </tbody>
 </table>
 
-<h2 id="arch">Architecture</h2>
-<div class="flow">┌──────────────────────── CONTROL PLANE (jump VM or container) ────────────────────────┐
-│                                                                                       │
-│   e2e_validate.sh ──── vsphere_provision.py ─────► vCenter API (443)                 │
-│         │                  scope: SnowCommander/Templates ONLY                        │
-│         │                                                                             │
-│         ├──── stage_bundle.sh ────► reads deploy-manifest.txt                         │
-│         │         picks 1 Falcon + 1 Tanium for the probed EL/arch                    │
-│         │         validates digests ─► 88 MB tar.gz                                   │
-│         │                                                                             │
-│         └──── deploy_targets.sh ──► SSH fan-out, N hosts in parallel                  │
-│                                                                                       │
-│   Holds: 14 RPMs, all scripts.   Holds NO secrets.   Runs NO agent.                   │
-└───────────────────────────────┬───────────────────────────────────────────────────────┘
-                                │ SSH :22   (bundle on one channel, secrets on another)
-                                ▼
-┌──────────────────────── TARGET (RHEL/CentOS/Rocky/Alma/Oracle 7-10) ─────────────────┐
-│   /home/tpx-admin/2026snowcommander/                                                  │
-│     security.sh          ← orchestrator, runs as root via sudo                        │
-│     lib/pkg_select.sh    ← detect → select → validate                                 │
-│     sub-reg.sh           ← RHSM register / unregister                                 │
-│     securitytools.env    ← mode 0600, shredded after the run                          │
-│                                                                                       │
-│   systemd:  falcon-sensor  ·  taniumclient  ·  rsyslog  ·  azcmagent                  │
-└───────────────────────────────────────────────────────────────────────────────────────┘</div>
+<h2 id="arch">System diagram</h2>
+<p>Two entry points share the same target-side logic. The control plane <b>orchestrates over SSH</b>;
+it never runs a security agent itself.</p>
+
+<h3>Path A — Template validation (vSphere)</h3>
+<div class="flow-row">
+  <div class="flow-box"><b>target.sh</b><small>Bash entry</small></div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box"><b>e2e_validate.sh</b><small>8-stage harness</small></div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box"><b>vsphere_provision.py</b><small>Python · pyVmomi</small></div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box"><b>vCenter</b><small>API :443</small></div>
+</div>
+<div class="flow-row">
+  <div class="flow-box"><b>stage_bundle.sh</b><small>rpm · tar · gzip</small></div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box"><b>SSH / scp</b><small>OpenSSH :22</small></div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box"><b>security.sh</b><small>on target VM</small></div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box"><b>template again</b><small>power off · MarkAsTemplate</small></div>
+</div>
+
+<h3>Path B — Fleet deploy (existing servers)</h3>
+<div class="flow-row">
+  <div class="flow-box"><b>target.sh</b><small>or entrypoint.sh</small></div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box"><b>deploy_targets.sh</b><small>parallel SSH fan-out</small></div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box"><b>stage_bundle.sh</b><small>per-host EL/arch</small></div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box"><b>security.sh</b><small>each inventory host</small></div>
+</div>
+
+<div class="arch-lanes">
+  <div class="lane">
+    <p class="lane-title">Control plane</p>
+    <p class="lane-sub">Jump VM or <code>sectools-deployer</code> container · AlmaLinux 9 · Bash</p>
+
+    <div class="node">
+      <b>target.sh</b>
+      <span>Catalogue of FW/BLR templates; wraps e2e and fleet commands.</span>
+      <span class="tech">Tech: Bash · OpenSSH client</span>
+    </div>
+    <div class="node">
+      <b>e2e_validate.sh</b>
+      <span>Clone or convert template → place scripts → install → verify → uninstall → finalize.</span>
+      <span class="tech">Tech: Bash · sshpass · Python 3</span>
+    </div>
+    <div class="node">
+      <b>vsphere_provision.py</b>
+      <span>Find template, clone/convert VM, attach NIC, power on, wait for IP. Scope locked to SnowCommander/Templates.</span>
+      <span class="tech">Tech: Python 3 · pyVmomi · vCenter API :443</span>
+    </div>
+    <div class="node">
+      <b>stage_bundle.sh</b>
+      <span>Read <code>deploy-manifest.txt</code>; pick 1 Falcon + 1 Tanium for probed EL/arch; validate digests; emit ~88&nbsp;MB tar.gz.</span>
+      <span class="tech">Tech: Bash · rpm · tar · gzip · lib/pkg_select.sh</span>
+    </div>
+    <div class="node">
+      <b>deploy_targets.sh</b>
+      <span>Probe each host, stage bundle, push over SSH, run <code>security.sh</code>, collect status. Bounded parallelism.</span>
+      <span class="tech">Tech: Bash · OpenSSH · GNU parallel logic</span>
+    </div>
+    <div class="node">
+      <b>entrypoint.sh</b>
+      <span>Container commands: <code>plan</code>, <code>verify</code>, <code>deploy</code>, <code>packages</code>.</span>
+      <span class="tech">Tech: Podman/Docker · read-only rootfs · secrets mounted at runtime</span>
+    </div>
+    <p class="meta" style="margin:12px 0 0">Ships: 14 RPMs + all scripts · Never ships: live secrets · Never runs: agents</p>
+  </div>
+
+  <div class="arrow-col">SSH :22<br>bundle ∥ secrets</div>
+
+  <div class="lane">
+    <p class="lane-title">Target host</p>
+    <p class="lane-sub">RHEL / CentOS / Rocky / Alma / Oracle · EL7–EL10 · x86_64 or aarch64</p>
+
+    <div class="node">
+      <b>/home/tpx-admin/2026snowcommander/</b>
+      <span>Scripts extracted here. No sudo needed for the file transfer.</span>
+      <span class="tech">Transport: scp / tar over SSH</span>
+    </div>
+    <div class="node">
+      <b>securitytools.env</b>
+      <span>Secrets on a separate SSH channel into mode <code>0600</code>; shredded after the run.</span>
+      <span class="tech">Tech: Bash · OpenSSH</span>
+    </div>
+    <div class="node">
+      <b>sub-reg.sh</b>
+      <span>Register with RHSM before syslog install; unregister appliance templates after verify.</span>
+      <span class="tech">Tech: subscription-manager · yum/dnf</span>
+    </div>
+    <div class="node">
+      <b>security.sh</b>
+      <span>Main orchestrator — detect platform, select packages, install five components, report status.</span>
+      <span class="tech">Tech: Bash · sudo · systemd</span>
+    </div>
+    <div class="node">
+      <b>lib/pkg_select.sh</b>
+      <span><code>/etc/os-release</code> → elN tag · <code>uname -m</code> → arch · rpm -K digest check.</span>
+      <span class="tech">Tech: Bash · rpm</span>
+    </div>
+    <div class="node">
+      <b>Installed services</b>
+      <span>CrowdStrike <code>falcon-sensor</code> · Tanium <code>taniumclient</code> · rsyslog · Azure Arc <code>azcmagent</code> · local <code>cmdbsync</code> user.</span>
+      <span class="tech">Tech: systemd · kernel sensor · Azure SP auth</span>
+    </div>
+  </div>
+</div>
+
+<h3>On the target — install sequence</h3>
+<div class="flow-row">
+  <div class="flow-box"><b>1 detect</b><small>lib/pkg_select.sh<br>os-release + uname</small></div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box"><b>2 select</b><small>1 Falcon + 1 Tanium<br>matched EL/arch</small></div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box"><b>3 validate</b><small>rpm -K digests<br>abort if corrupt</small></div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box"><b>4 RHSM</b><small>sub-reg.sh<br>if syslog needed</small></div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box"><b>5 install</b><small>security.sh all<br>5 components</small></div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box"><b>6 verify</b><small>systemctl + status block<br>per component</small></div>
+</div>
+
+<h3>Five components installed by security.sh</h3>
+<div class="grid">
+  <div class="card"><h4>crowdstrike</h4><p>Falcon RPM + <code>falconctl</code> CID<br><span class="tag">kernel sensor</span> <span class="tag">systemd</span></p></div>
+  <div class="card"><h4>tanium</h4><p>TaniumClient RPM + init dat<br><span class="tag">systemd</span> <span class="tag">glibc build</span></p></div>
+  <div class="card"><h4>cmdbsync</h4><p>Local user + sudoers<br><span class="tag">visudo</span></p></div>
+  <div class="card"><h4>sentinel</h4><p><code>sentinel_core.sh</code> → azcmagent<br><span class="tag">Azure SP</span> <span class="tag">Arc</span></p></div>
+  <div class="card"><h4>syslog</h4><p>rsyslog + remote conf<br><span class="tag">yum/dnf</span> <span class="tag">RHSM</span></p></div>
+</div>
 
 <h2 id="flow">End-to-end flow</h2>
 <p>The validation harness runs eight stages and prints a pass/fail matrix at the end.</p>
@@ -264,10 +397,13 @@ stranded as a VM.</div>
 
 <h3>Platform detection</h3>
 <p>Reads <code>ID</code> and <code>VERSION_ID</code> from <code>/etc/os-release</code>, maps the family to an
-<code>elN</code> tag, and normalises the architecture. Debian, Ubuntu and Fedora are rejected with exit 3 and
-an explicit message rather than being silently mis-served — no <code>.deb</code> packages exist here.</p>
+<code>elN</code> tag, and normalises the architecture from <code>uname -m</code>. Debian, Ubuntu and Fedora
+are rejected with exit 3 and an explicit message rather than being silently mis-served — no
+<code>.deb</code> packages exist here.</p>
 <div class="note"><b>Names lie, metadata doesn't.</b> The template <code>BLR-GI-6.6</code> is
-Vocera 6.6 running on <b>RHEL 7.9</b>, not RHEL 6.6. Detection reads the OS, never the label.</div>
+Vocera 6.6 running on <b>RHEL 7.9</b>, not RHEL 6.6. Detection reads the OS, never the label. vSphere
+may report an older guest OS string; trust <code>/etc/os-release</code> and the structured
+<code>arch=</code> line in the status block.</div>
 
 <h3>Idempotency</h3>
 <p>Every component compares desired state against actual state:</p>
@@ -308,6 +444,7 @@ redacted: it is an identifier, not a credential.</p>
 <tr><td><code>scripts/vsphere_provision.py</code></td><td>398</td><td>vSphere stages. Scope-locked to <code>SnowCommander/Templates</code>.</td></tr>
 <tr><td><code>scripts/deploy_targets.sh</code></td><td>308</td><td>SSH fan-out with bounded concurrency and retries.</td></tr>
 <tr><td><code>scripts/stage_bundle.sh</code></td><td>189</td><td>Builds the per-target bundle from the manifest.</td></tr>
+<tr><td><code>target.sh</code></td><td>400</td><td>Single entry point: FW/BLR/STC template catalogue, <code>e2e-site</code>, fleet deploy.</td></tr>
 <tr><td><code>entrypoint.sh</code></td><td>155</td><td>Container entry: <code>plan</code>, <code>verify</code>, <code>deploy</code>, <code>packages</code>, <code>bundle</code>.</td></tr>
 </tbody>
 </table>
@@ -318,9 +455,46 @@ it has its own inlined component logic.</p>
 <p><code>install_crowdstrike.sh</code> &middot; <code>install_tanium.sh</code> &middot;
 <code>install_cmdbsync.sh</code> &middot; <code>install_sentinel.sh</code> &middot; <code>install_syslog.sh</code></p>
 
+<h2 id="cpu-arch">CPU architecture</h2>
+<p>Every target is classified as <code>x86_64</code> or <code>aarch64</code>. The control plane probes
+<code>uname -m</code> over SSH (or reads it on the host when <code>security.sh</code> runs locally), then
+ships exactly one CrowdStrike sensor and one Tanium client matched to that architecture. A mixed
+inventory — some x86_64 hosts and some aarch64 — is fine in a single deploy run.</p>
+
+<table>
+<thead><tr><th><code>uname -m</code></th><th>Normalised</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td><code>x86_64</code>, <code>amd64</code></td><td><code>x86_64</code></td><td>Default for FW/BLR SnowCommander templates today</td></tr>
+<tr><td><code>aarch64</code>, <code>arm64</code></td><td><code>aarch64</code></td><td>Supported from EL8 upward for Falcon; Tanium uses a separate glibc build</td></tr>
+<tr><td>anything else</td><td class="bad">rejected</td><td>Exit code <code>4</code> — no staged package exists</td></tr>
+</tbody>
+</table>
+
+<h3>Staged package matrix (14 RPMs)</h3>
+<p>CrowdStrike ships genuinely distinct per-EL builds. Tanium ships two payloads keyed by architecture,
+not by the <code>rheN</code> in the filename.</p>
+<table>
+<thead><tr><th>EL</th><th>x86_64</th><th>aarch64</th></tr></thead>
+<tbody>
+<tr><td>el7</td><td>Falcon ✓ · Tanium ✓</td><td>Falcon <span class="bad">not published</span> · Tanium ✓</td></tr>
+<tr><td>el8</td><td>Falcon ✓ · Tanium ✓</td><td>Falcon ✓ · Tanium ✓</td></tr>
+<tr><td>el9</td><td>Falcon ✓ · Tanium ✓</td><td>Falcon ✓ · Tanium ✓</td></tr>
+<tr><td>el10</td><td>Falcon ✓ · Tanium ✓</td><td>Falcon ✓ · Tanium ✓</td></tr>
+</tbody>
+</table>
+
+<div class="note"><b>Tanium is arch-keyed, not version-keyed.</b> Seven filenames, two unique payloads:
+<code>glibc2.17.systemd</code> for x86_64 and <code>glibc2.26.systemd</code> for aarch64. Selection reads
+RPM header metadata when the cosmetic <code>rheN</code> filename does not match.</div>
+
+<div class="note caution"><b>el7 aarch64 + CrowdStrike.</b> No el7 aarch64 Falcon sensor is staged.
+Deploys to such a host fail at bundle time with a clear message — they are not silently given an
+x86_64 package.</div>
+
 <h2 id="packages">Package selection</h2>
 <p>14 RPMs staged; exactly two are shipped per host. Selection is by glob with the highest version winning,
-so staging a newer sensor needs no code change.</p>
+so staging a newer sensor needs no code change. See <a href="#cpu-arch">CPU architecture</a> for the
+full EL × arch matrix.</p>
 <table>
 <thead><tr><th>Target</th><th>CrowdStrike</th><th>Tanium</th></tr></thead>
 <tbody>
@@ -330,14 +504,50 @@ so staging a newer sensor needs no code change.</p>
 <tr><td>el8 / el9 / el10 aarch64</td><td class="ok">✓</td><td class="ok">✓</td></tr>
 </tbody>
 </table>
-<div class="note"><b>Tanium is arch-keyed, not version-keyed.</b> The seven Tanium filenames contain only
-two unique payloads — one <code>glibc2.17</code> x86_64 build and one <code>glibc2.26</code> aarch64 build.
-The <code>rheN</code> in the filename is cosmetic, so selection falls back to matching the RPM header's
-architecture.</div>
 
 <h3>Validation gate</h3>
 <p>Every candidate must pass all five checks or the run aborts before the host is modified: file present
 and non-empty, header parseable, package name matches, architecture installable, payload digests verify.</p>
+
+<h2 id="templates">vSphere templates — FW &amp; BLR</h2>
+<p>Six templates per site live under <code>SnowCommander/Template(s)</code>. All twelve current golden
+images are <b>x86_64</b>. The harness detects the real OS and architecture at runtime — never from the
+template name.</p>
+
+<p>Configured in <code>target.sh</code>. List them with <code>./target.sh list</code>; validate every
+template on one site with <code>./target.sh e2e-site fw --template-cycle</code>.</p>
+
+<h3>Fort Wayne (FW)</h3>
+<table>
+<thead><tr><th>Template</th><th>Architecture</th><th>Type</th><th>Typical guest OS</th><th>RHSM after cycle</th></tr></thead>
+<tbody>
+<tr><td><code>FW-Redhat-9</code></td><td>x86_64</td><td>Red Hat base</td><td>RHEL 9</td><td>keep</td></tr>
+<tr><td><code>FW-Redhat-10</code></td><td>x86_64</td><td>Red Hat base</td><td>RHEL 10</td><td>keep</td></tr>
+<tr><td><code>FW-GI-6.6</code></td><td>x86_64</td><td>Vocera / GI appliance</td><td>RHEL 7.9 (name ≠ OS version)</td><td>remove</td></tr>
+<tr><td><code>FW-GI-7.1</code></td><td>x86_64</td><td>Vocera / GI appliance</td><td>RHEL 7.x</td><td>remove</td></tr>
+<tr><td><code>FW-GI-7.2</code></td><td>x86_64</td><td>Vocera / GI appliance</td><td>RHEL 7.x</td><td>remove</td></tr>
+<tr><td><code>FW-GI-7.3</code></td><td>x86_64</td><td>Vocera / GI appliance</td><td>RHEL 7.x</td><td>remove</td></tr>
+</tbody>
+</table>
+<p class="meta">vCenter: fw-vsphere-01.strykercorp.com · portgroup: fwa-vlan106 · FQDN domain: vcraeng.com</p>
+
+<h3>Bangalore (BLR)</h3>
+<table>
+<thead><tr><th>Template</th><th>Architecture</th><th>Type</th><th>Typical guest OS</th><th>RHSM after cycle</th></tr></thead>
+<tbody>
+<tr><td><code>BLR-Redhat-9</code></td><td>x86_64</td><td>Red Hat base</td><td>RHEL 9</td><td>keep</td></tr>
+<tr><td><code>BLR-Redhat-10</code></td><td>x86_64</td><td>Red Hat base</td><td>RHEL 10</td><td>keep</td></tr>
+<tr><td><code>BLR-GI-6.6</code></td><td>x86_64</td><td>Vocera / GI appliance</td><td>RHEL 7.9 (name ≠ OS version)</td><td>remove</td></tr>
+<tr><td><code>BLR-GI-7.1</code></td><td>x86_64</td><td>Vocera / GI appliance</td><td>RHEL 7.x</td><td>remove</td></tr>
+<tr><td><code>BLR-GI-7.2</code></td><td>x86_64</td><td>Vocera / GI appliance</td><td>RHEL 7.x</td><td>remove</td></tr>
+<tr><td><code>BLR-GI-7.3</code></td><td>x86_64</td><td>Vocera / GI appliance</td><td>RHEL 7.x</td><td>remove</td></tr>
+</tbody>
+</table>
+<p class="meta">vCenter: blr-vsphere-01.strykercorp.com · portgroup: VM Network</p>
+
+<div class="note"><b>Package picked per detected EL + arch.</b> A GI template on RHEL 7.9 x86_64 receives
+<code>falcon-sensor-*-el7.x86_64.rpm</code> and the glibc2.17 Tanium x86_64 build, regardless of the
+<code>GI-6.6</code> label.</div>
 
 <h2 id="creds">Credentials — where they are set</h2>
 <p>Four sets, one file, kept <b>outside</b> the repository. Everything is read from the environment;
@@ -461,20 +671,16 @@ must never run at once, and the address must be free before you start.</div>
 <pre><code>cd /home/tpx-admin/snowcommander_scripts
 set -a; source ~/.snowcommander-creds.env; set +a
 
-VC=fw-vsphere-01.strykercorp.com
-PG=<span class="str">'VM Network'</span>
+<span class="cmt"># All six FW templates (x86_64) — round-trip each golden image</span>
+./target.sh e2e-site fw --template-cycle
 
-<span class="cmt"># Discover names from vCenter rather than hardcoding them</span>
-python3 scripts/vsphere_provision.py --vcenter <span class="kw">$VC</span> --list-templates --insecure
+<span class="cmt"># All six BLR templates</span>
+./target.sh e2e-site blr --template-cycle
 
-<span class="kw">for</span> t <span class="kw">in</span> BLR-Redhat-9 BLR-Redhat-10 BLR-GI-6.6 BLR-GI-7.1 BLR-GI-7.2 BLR-GI-7.3; <span class="kw">do</span>
-  <span class="kw">echo</span> <span class="str">"########## $t ##########"</span>
-  ./scripts/e2e_validate.sh \
-    --vcenter <span class="kw">$VC</span> --template <span class="str">"$t"</span> \
-    --name <span class="str">"e2e-fw-${t,,}"</span> \
-    --portgroup <span class="kw">$PG</span> --insecure \
-    2>&1 | tee <span class="str">"/tmp/e2e-fw-${t}.log"</span>
-<span class="kw">done</span></code></pre>
+<span class="cmt"># Or discover live names from vCenter first</span>
+./target.sh list-vcenter fw
+python3 scripts/vsphere_provision.py \
+  --vcenter fw-vsphere-01.strykercorp.com --list-templates --insecure</code></pre>
 
 <h2 id="all-three">All three vSphere at once</h2>
 <p>Each vCenter is processed in its own background job, with one log file per template.
