@@ -112,6 +112,7 @@
   <a href="#fleet">Fleet deploy</a>
   <a href="#pipeline">GitHub pipeline</a>
   <a href="#gitcli">Git CLI</a>
+  <a href="#hosting">Host this site</a>
   <div class="grp">Operate</div>
   <a href="#exit">Exit codes</a>
   <a href="#trouble">Troubleshooting</a>
@@ -214,7 +215,7 @@ containerized copy would report the container instead of the VM:</p>
                                 │ SSH :22   (bundle on one channel, secrets on another)
                                 ▼
 ┌──────────────────────── TARGET (RHEL/CentOS/Rocky/Alma/Oracle 7-10) ─────────────────┐
-│   /var/tmp/sectools/                                                                  │
+│   /home/tpx-admin/2026snowcommander/                                                  │
 │     security.sh          ← orchestrator, runs as root via sudo                        │
 │     lib/pkg_select.sh    ← detect → select → validate                                 │
 │     sub-reg.sh           ← RHSM register / unregister                                 │
@@ -229,12 +230,35 @@ containerized copy would report the container instead of the VM:</p>
 <li><b>Connect to vSphere</b><span>pyVmomi <code>SmartConnect</code> to vCenter on 443.</span></li>
 <li><b>Find the template</b><span>Search restricted to <code>SnowCommander/Templates</code>. Anything outside is invisible and refused with exit 7.</span></li>
 <li><b>Template → VM</b><span>Clone (template preserved), connect the NIC at both <code>connected</code> and <code>startConnected</code>, power on, wait for an IPv4 address.</span></li>
-<li><b>Place the scripts</b><span>Probe the guest, build a matched 88 MB bundle, extract to <code>/var/tmp/sectools</code>. Secrets follow on a separate channel into a 0600 file.</span></li>
+<li><b>Place the scripts</b><span>Remove the stale <code>2026snowcommander</code> payload, build a matched 88 MB bundle, extract to <code>/home/tpx-admin/2026snowcommander</code>, and add the FQDN to <code>/etc/hosts</code>. Secrets follow on a separate channel into a 0600 file.</span></li>
 <li><b>Install the tools</b><span>RHSM register if needed, then <code>security.sh all</code> — detect, select, validate, install, configure.</span></li>
 <li><b>Verify with systemctl</b><span><code>systemctl is-active</code> per service, <code>rpm -q</code> per package, plus structured verification.</span></li>
-<li><b>Uninstall the tools</b><span><code>uninstall.sh all</code>, then confirm packages and services are gone. Appliance templates unregister from RHSM here.</span></li>
+<li><b>Uninstall the tools</b><span>Remove the three agents — Tanium, CrowdStrike and Sentinel. The <code>cmdbsync</code> account and the Red Hat subscription are deliberately <b>retained</b>, and stage 7 re-checks both to prove they survived. Appliance templates unregister from RHSM here.</span></li>
 <li><b>Confirm the scripts remain</b><span>Assert every expected script is still present, then shred <code>securitytools.env</code>.</span></li>
 </ol>
+
+<p>With <code>--template-cycle</code> a ninth step follows: shut the guest down
+cleanly and call <code>MarkAsTemplate</code>, so the validated machine becomes a
+golden image again.</p>
+
+<div class="note"><b>Failure is self-healing.</b> If the run ends before
+finalisation, an <code>EXIT</code> trap converts the object back to a template
+anyway. A crash between stage 3 and the end cannot leave your golden image
+stranded as a VM.</div>
+
+<h3>What the end state looks like</h3>
+<table>
+<thead><tr><th>Item</th><th>State after a full cycle</th></tr></thead>
+<tbody>
+<tr><td><code>/home/tpx-admin/2026snowcommander</code></td><td>Current scripts, ready to re-run</td></tr>
+<tr><td>Stale <code>2026snowcommander</code> payload</td><td>Removed, including the superseded RPMs</td></tr>
+<tr><td><code>securitytools.env</code></td><td>Shredded — no credentials left behind</td></tr>
+<tr><td>Tanium, CrowdStrike, Sentinel</td><td>Uninstalled</td></tr>
+<tr><td><code>cmdbsync</code> account and sudoers</td><td><b>Retained</b></td></tr>
+<tr><td>Red Hat subscription</td><td><b>Retained</b> for <code>*Redhat*</code> templates</td></tr>
+<tr><td>The vSphere object</td><td>A template again</td></tr>
+</tbody>
+</table>
 
 <h2 id="mechanism">Mechanism</h2>
 
@@ -382,21 +406,56 @@ python3 scripts/vsphere_provision.py \
 ./scripts/e2e_validate.sh --existing-host blr-gi-6 --keep-tools</code></pre>
 
 <h2 id="one-template">One template at a time</h2>
+
+<p>Two ways to validate a template. Pick based on whether you want a second
+object in the inventory afterwards.</p>
+
+<h3>Round trip on the template itself (recommended)</h3>
+<p>No new VM. The template becomes a VM, is validated, and is converted back.</p>
+<pre><code>cd /home/tpx-admin/snowcommander_scripts
+set -a; source ~/.snowcommander-creds.env; set +a
+
+./scripts/e2e_validate.sh \
+  --vcenter fw-vsphere-01.strykercorp.com \
+  --template FW-Redhat-9 \
+  --template-cycle \
+  --portgroup <span class="str">'fwa-vlan106'</span> \
+  --fqdn-domain vcraeng.com \
+  --insecure</code></pre>
+<p><code>--template-cycle</code> is shorthand for <code>--mode convert</code>,
+the destructive acknowledgement, and <code>--convert-to-template</code>.</p>
+
+<h3>Clone into a new VM</h3>
+<p>Leaves the template untouched and produces a second object.</p>
 <pre><code>./scripts/e2e_validate.sh \
   --vcenter fw-vsphere-01.strykercorp.com \
-  --template BLR-Redhat-9 \
+  --template FW-Redhat-9 \
   --name e2e-fw-rhel9 \
-  --portgroup <span class="str">'VM Network'</span> \
+  --portgroup <span class="str">'fwa-vlan106'</span> \
   --insecure</code></pre>
-<p>Useful variations:</p>
+
+<h3>Useful variations</h3>
 <pre><code><span class="cmt"># keep the tools installed for inspection (skip stage 7)</span>
 ./scripts/e2e_validate.sh ... --keep-tools
 
-<span class="cmt"># force subscription behaviour instead of inferring it</span>
+<span class="cmt"># force subscription behaviour instead of inferring it from the name</span>
 ./scripts/e2e_validate.sh ... --rhsm-mode remove
 
-<span class="cmt"># only some components</span>
-./scripts/e2e_validate.sh ... --components <span class="str">"crowdstrike tanium"</span></code></pre>
+<span class="cmt"># install only some components</span>
+./scripts/e2e_validate.sh ... --components <span class="str">"crowdstrike tanium"</span>
+
+<span class="cmt"># change what stage 7 tears down (default: the three agents)</span>
+./scripts/e2e_validate.sh ... --uninstall-components <span class="str">"tanium crowdstrike"</span>
+
+<span class="cmt"># different script location on the target</span>
+./scripts/e2e_validate.sh ... --remote-dir /opt/snowcommander
+
+<span class="cmt"># validate a host that already exists, skipping stages 1-3</span>
+./scripts/e2e_validate.sh --existing-host blr-gi-6 --keep-tools</code></pre>
+
+<div class="note caution"><b>No guest customization is applied.</b> The VM boots
+with the template's own hostname and static IP. Two clones of the same template
+must never run at once, and the address must be free before you start.</div>
 
 <h2 id="one-vsphere">Every template in one vSphere</h2>
 <pre><code>cd /home/tpx-admin/snowcommander_scripts
@@ -536,6 +595,56 @@ git diff --cached --name-only | grep -E <span class="str">'securitytools\.env$|\
 git commit -m <span class="str">"..."</span>
 git push -u origin fix/whatever</code></pre>
 <p>CI runs automatically on push and will fail the build if a secrets file is ever tracked.</p>
+
+<h2 id="hosting">Host this site</h2>
+<p>This page is a single self-contained HTML file with no external scripts,
+styles, fonts or images, so any static web server can serve it and it works
+offline.</p>
+
+<h3>Container</h3>
+<pre><code>cd /home/tpx-admin/snowcommander_scripts
+
+podman build -t snowcommander-docs:latest -f docs/Dockerfile docs/
+
+podman run -d --name snowcommander-docs \
+  -p 8080:8080 \
+  --read-only --tmpfs /tmp \
+  --cap-drop ALL \
+  --security-opt no-new-privileges \
+  snowcommander-docs:latest</code></pre>
+<p>Then browse <code>http://&lt;host&gt;:8080/</code>. Swap <code>podman</code>
+for <code>docker</code> if the daemon is running.</p>
+
+<h3>Why nginx and not Tomcat</h3>
+<p>Tomcat is a Java servlet container. There are no servlets, JSPs or Java here
+— it is one HTML file — so Tomcat would add a JVM and a considerably larger
+attack surface for no functional gain. The <code>nginx:alpine</code> image is a
+few megabytes and serves static content directly.</p>
+
+<h3>Hardening applied</h3>
+<table>
+<thead><tr><th>Control</th><th>How</th></tr></thead>
+<tbody>
+<tr><td>Unprivileged user</td><td>Runs as <code>nginx</code> (uid 101), not root</td></tr>
+<tr><td>No privileged port</td><td>Listens on 8080, so no <code>NET_BIND_SERVICE</code> capability</td></tr>
+<tr><td>Read-only root filesystem</td><td>Temp paths redirected to <code>/tmp</code> tmpfs</td></tr>
+<tr><td>All capabilities dropped</td><td><code>--cap-drop ALL</code></td></tr>
+<tr><td>Content Security Policy</td><td><code>default-src 'none'</code> — safe because nothing is loaded externally</td></tr>
+<tr><td>Version disclosure off</td><td><code>server_tokens off</code></td></tr>
+<tr><td>Health endpoint</td><td><code>/healthz</code>, used by the container <code>HEALTHCHECK</code></td></tr>
+</tbody>
+</table>
+
+<h3>Without a container</h3>
+<pre><code><span class="cmt"># Any existing nginx or httpd</span>
+sudo cp docs/index.html /usr/share/nginx/html/index.html
+
+<span class="cmt"># Or a throwaway server for a quick look</span>
+cd docs && python3 -m http.server 8080</code></pre>
+
+<h3>GitHub Pages</h3>
+<p>Settings &rarr; Pages &rarr; Source: <code>main</code> / <code>docs</code>.
+No build step is needed because the file has no dependencies.</p>
 
 <h2 id="exit">Exit codes</h2>
 <table>
