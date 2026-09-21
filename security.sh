@@ -323,6 +323,14 @@ service_active() {
   systemctl is-active --quiet "$1" 2>/dev/null
 }
 
+# rpm -q prints "package NAME is not installed" to stdout on failure; never
+# treat that text as a version string.
+rpm_installed_version() {
+  local name="$1"
+  rpm -q "$name" >/dev/null 2>&1 || return 1
+  rpm -q --qf '%{VERSION}-%{RELEASE}' "$name" 2>/dev/null
+}
+
 # ------------------------------------------------------------------------------
 # Package resolution — runs once, before any component executes, so an
 # incompatible or corrupt package fails the run before it changes the host.
@@ -370,7 +378,7 @@ install_tanium() {
 
   local staged installed
   staged="$(rpm -qp --nosignature --qf '%{VERSION}-%{RELEASE}' "$rpm_path" 2>/dev/null)" || staged=""
-  installed="$(rpm -q --qf '%{VERSION}-%{RELEASE}' TaniumClient 2>/dev/null || true)"
+  installed="$(rpm_installed_version TaniumClient 2>/dev/null || true)"
 
   if [[ -n "$installed" && "$installed" == "$staged" ]]; then
     log "  TaniumClient ${installed} already installed"
@@ -416,7 +424,7 @@ install_tanium() {
   fi
 
   local final
-  final="$(rpm -q --qf '%{VERSION}-%{RELEASE}' TaniumClient 2>/dev/null || echo unknown)"
+  final="$(rpm_installed_version TaniumClient 2>/dev/null || echo unknown)"
   if [[ "$changed" == "1" ]]; then
     set_result tanium SUCCESS "TaniumClient ${final} active"
   else
@@ -472,7 +480,7 @@ install_crowdstrike() {
 
   local staged installed
   staged="$(rpm -qp --nosignature --qf '%{VERSION}-%{RELEASE}' "$rpm_path" 2>/dev/null)" || staged=""
-  installed="$(rpm -q --qf '%{VERSION}-%{RELEASE}' falcon-sensor 2>/dev/null || true)"
+  installed="$(rpm_installed_version falcon-sensor 2>/dev/null || true)"
 
   local current_cid=""
   current_cid="$(_normalize_cid "$(_falcon_current_cid)")"
@@ -817,7 +825,7 @@ verify_component() {
   case "$component" in
     tanium)
       local pkg svc
-      pkg="$(rpm -q --qf '%{VERSION}-%{RELEASE}' TaniumClient 2>/dev/null || true)"
+      pkg="$(rpm_installed_version TaniumClient 2>/dev/null || true)"
       if [[ -z "$pkg" ]]; then
         set_result tanium NOT_INSTALLED "TaniumClient package absent"
         return 0
@@ -832,9 +840,13 @@ verify_component() {
       ;;
     crowdstrike)
       local pkg aid cid
-      pkg="$(rpm -q --qf '%{VERSION}-%{RELEASE}' falcon-sensor 2>/dev/null || true)"
-      if [[ -z "$pkg" && ! -x /opt/CrowdStrike/falconctl ]]; then
-        set_result crowdstrike NOT_INSTALLED "falcon-sensor package absent"
+      pkg="$(rpm_installed_version falcon-sensor 2>/dev/null || true)"
+      if [[ -z "$pkg" ]]; then
+        if [[ -x /opt/CrowdStrike/falconctl ]]; then
+          set_result crowdstrike FAILED "falconctl present but falcon-sensor package absent"
+        else
+          set_result crowdstrike NOT_INSTALLED "falcon-sensor package absent"
+        fi
         return 0
       fi
       if ! service_active falcon-sensor.service; then
