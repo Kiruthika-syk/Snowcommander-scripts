@@ -102,6 +102,52 @@ ENV_DISPOSITION="${ENV_DISPOSITION:-keep}"
 # securitytools.env is an identifier or plain configuration.
 SECRET_ENV_KEYS=(AZCM_SP_SECRET CMDBSYNC_PASSWORD RHSM_PASSWORD FALCON_PROVISIONING_TOKEN)
 
+# Every key that belongs in securitytools.env, with its default. Listing them
+# here rather than as individual printf calls means a new setting is picked up
+# by adding one line, and nothing can be silently dropped on the way to the
+# target. Keys with no value and no default are written empty.
+ENV_KEYS=(
+  "FALCON_CID="
+  "FALCON_PROVISIONING_TOKEN="
+  "CMDBSYNC_PASSWORD="
+  "CMDBSYNC_UID=2800"
+  "CMDBSYNC_GID=1700"
+  "AZCM_SP_CLIENT_ID="
+  "AZCM_SP_SECRET="
+  "AZCM_SUBSCRIPTION_ID="
+  "AZCM_TENANT_ID="
+  "AZCM_RESOURCE_GROUP="
+  "AZCM_LOCATION=eastus2"
+  "AZCM_CLOUD=AzureCloud"
+  "AZCM_TAGS=Environment=Production"
+  "AZCM_CORRELATION_ID="
+  "AZCM_DISCONNECT_BEFORE_CONNECT=1"
+  "RHSM_USERNAME="
+  "RHSM_PASSWORD="
+  "SYSLOG_SERVER1=10.132.118.100"
+  "SYSLOG_SERVER2=10.50.118.100"
+  "SYSLOG_PORT=514"
+  "CMDBSYNC_FORCE_PASSWORD="
+  "SENTINEL_FORCE_RECONNECT="
+)
+
+# Emit "KEY=value" for every entry, using the live environment when set and
+# falling back to the default. $1 = "all" or "nosecrets".
+render_env_file() {
+  local mode="${1:-all}" entry key default value
+  for entry in "${ENV_KEYS[@]}"; do
+    key="${entry%%=*}"
+    default="${entry#*=}"
+    value="${!key:-$default}"
+    if [[ "$mode" == "nosecrets" ]]; then
+      for secret_key in "${SECRET_ENV_KEYS[@]}"; do
+        [[ "$key" == "$secret_key" ]] && value="" && break
+      done
+    fi
+    printf '%s=%s\n' "$key" "$value"
+  done
+}
+
 # RHSM handling:
 #   auto    infer from the template/guest - Red Hat templates keep the
 #           subscription, GI/Vocera appliance templates are unregistered again
@@ -623,29 +669,23 @@ rsh "find \$HOME -name 'falcon-sensor*.rpm' -o -name 'TaniumClient*.rpm' 2>/dev/
 # Secrets go on their own channel into a 0600 file.
 envfile="$(mktemp)"
 chmod 600 "$envfile"
-{
-  printf 'FALCON_CID=%s\n' "${FALCON_CID:-}"
-  # No provisioning token: this tenant does not require one.
-  printf 'CMDBSYNC_PASSWORD=%s\n' "${CMDBSYNC_PASSWORD:-}"
-  printf 'CMDBSYNC_UID=%s\n' "${CMDBSYNC_UID:-2800}"
-  printf 'CMDBSYNC_GID=%s\n' "${CMDBSYNC_GID:-1700}"
-  printf 'AZCM_SP_CLIENT_ID=%s\n' "${AZCM_SP_CLIENT_ID:-}"
-  printf 'AZCM_SP_SECRET=%s\n' "${AZCM_SP_SECRET:-}"
-  printf 'AZCM_SUBSCRIPTION_ID=%s\n' "${AZCM_SUBSCRIPTION_ID:-}"
-  printf 'AZCM_TENANT_ID=%s\n' "${AZCM_TENANT_ID:-}"
-  printf 'AZCM_RESOURCE_GROUP=%s\n' "${AZCM_RESOURCE_GROUP:-}"
-  printf 'AZCM_LOCATION=%s\n' "${AZCM_LOCATION:-eastus2}"
-  printf 'AZCM_CLOUD=%s\n' "${AZCM_CLOUD:-AzureCloud}"
-  printf 'AZCM_TAGS=%s\n' "${AZCM_TAGS:-Environment=Test}"
-  printf 'SYSLOG_SERVER1=%s\n' "${SYSLOG_SERVER1:-10.132.118.100}"
-  printf 'SYSLOG_SERVER2=%s\n' "${SYSLOG_SERVER2:-10.50.118.100}"
-  printf 'SYSLOG_PORT=%s\n' "${SYSLOG_PORT:-514}"
-  [[ -n "${RHSM_USERNAME:-}" ]] && printf 'RHSM_USERNAME=%s\n' "$RHSM_USERNAME"
-  [[ -n "${RHSM_PASSWORD:-}" ]] && printf 'RHSM_PASSWORD=%s\n' "$RHSM_PASSWORD"
-} >"$envfile"
+render_env_file all >"$envfile"
 rsh "umask 077; cat > ${REMOTE_DIR}/securitytools.env" <"$envfile"
+info "securitytools.env written with mode 600, $(grep -c '^[A-Z]' "$envfile") variables"
 shred -u "$envfile" 2>/dev/null || rm -f "$envfile"
-info "securitytools.env written with mode 600"
+
+# Confirm every expected key actually landed.
+missing_keys=""
+for entry in "${ENV_KEYS[@]}"; do
+  key="${entry%%=*}"
+  rsh "grep -q '^${key}=' ${REMOTE_DIR}/securitytools.env" 2>/dev/null \
+    || missing_keys="${missing_keys} ${key}"
+done
+if [[ -n "$missing_keys" ]]; then
+  info "WARNING: keys absent from the target env file:${missing_keys}"
+else
+  info "verified: all ${#ENV_KEYS[@]} variables present on the target"
+fi
 
 # --- FQDN entry in /etc/hosts -------------------------------------------------
 # The clone inherits the template's hostname and IP because no guest
@@ -929,25 +969,7 @@ case "$ENV_DISPOSITION" in
 #   3. Edit this file in place on the running VM, then remove the values again.
 #
 HDR
-      printf 'FALCON_CID=%s\n'            "${FALCON_CID:-}"
-      printf 'CMDBSYNC_UID=%s\n'          "${CMDBSYNC_UID:-2800}"
-      printf 'CMDBSYNC_GID=%s\n'          "${CMDBSYNC_GID:-1700}"
-      printf 'AZCM_SP_CLIENT_ID=%s\n'     "${AZCM_SP_CLIENT_ID:-}"
-      printf 'AZCM_SUBSCRIPTION_ID=%s\n'  "${AZCM_SUBSCRIPTION_ID:-}"
-      printf 'AZCM_TENANT_ID=%s\n'        "${AZCM_TENANT_ID:-}"
-      printf 'AZCM_RESOURCE_GROUP=%s\n'   "${AZCM_RESOURCE_GROUP:-}"
-      printf 'AZCM_LOCATION=%s\n'         "${AZCM_LOCATION:-eastus2}"
-      printf 'AZCM_CLOUD=%s\n'            "${AZCM_CLOUD:-AzureCloud}"
-      printf 'AZCM_TAGS=%s\n'             "${AZCM_TAGS:-Environment=Production}"
-      printf 'RHSM_USERNAME=%s\n'         "${RHSM_USERNAME:-}"
-      printf 'SYSLOG_SERVER1=%s\n'        "${SYSLOG_SERVER1:-10.132.118.100}"
-      printf 'SYSLOG_SERVER2=%s\n'        "${SYSLOG_SERVER2:-10.50.118.100}"
-      printf 'SYSLOG_PORT=%s\n'           "${SYSLOG_PORT:-514}"
-      echo
-      echo '# --- supply these at deploy time -------------------------------'
-      for secret_key in "${SECRET_ENV_KEYS[@]}"; do
-        printf '%s=\n' "$secret_key"
-      done
+      render_env_file nosecrets
     } >"$sanitized"
 
     rsh "umask 077; cat > ${REMOTE_DIR}/securitytools.env" <"$sanitized" \
