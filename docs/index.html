@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Snow Commander — Security Tools Deployment</title>
+<title>RHEL Security Tools — Template Provisioning &amp; Deployment</title>
 <style>
   :root{
     --bg:#0f1115; --panel:#161920; --panel2:#1b1f27; --line:#272c36;
@@ -90,7 +90,7 @@
 <body>
 <div class="wrap">
 <nav>
-  <div class="brand"><b>Snow Commander</b><span>Security tools deployment</span></div>
+  <div class="brand"><b>RHEL Security Tools</b><span>Template provisioning &amp; deployment</span></div>
   <div class="grp">Understand</div>
   <a href="#overview">Overview</a>
   <a href="#does">What it does</a>
@@ -121,13 +121,13 @@
 
 <main>
 
-<h1>Snow Commander</h1>
+<h1>RHEL Security Tools</h1>
 <p class="lede">Automated deployment, validation and teardown of enterprise security tooling across
 Red Hat Enterprise Linux estates — from a vSphere template to a verified host, with every step logged.</p>
 <p class="meta">CrowdStrike Falcon 8.10.0-19402 &middot; Tanium Client 7.8.4.1298 &middot; EL7–EL10 &middot; x86_64 + aarch64</p>
 
 <h2 id="overview">Overview</h2>
-<p>Snow Commander installs and verifies five security components on RHEL-family servers. It grew out of a
+<p>This tooling installs and verifies five security components on RHEL-family servers. It grew out of a
 single installer script and now has four layers that share the same core logic: a host-side orchestrator,
 an SSH fan-out control plane, a container image, and a CI/CD pipeline.</p>
 
@@ -512,7 +512,7 @@ real VMs simultaneously. Confirm a single clean pass before scaling out.</div>
 <p>For servers that already exist, skip vSphere entirely and use the container.</p>
 <pre><code><span class="cmt"># Build once</span>
 cd /home/tpx-admin/snowcommander_scripts
-podman build -t snowcommander-deployer:latest .
+podman build -t sectools-deployer:latest .
 
 <span class="cmt"># Inventory: one hostname per line</span>
 cp inventory.example inventory && vi inventory
@@ -525,7 +525,7 @@ podman run --rm \
   -v ./inventory:/etc/snowcommander/inventory:ro \
   -e INVENTORY=/etc/snowcommander/inventory \
   -e PARALLEL=10 -e RETRIES=2 \
-  snowcommander-deployer:latest plan</code></pre>
+  sectools-deployer:latest plan</code></pre>
 <p>Swap the final argument for <code>verify</code> or <code>deploy all</code>. Or run the fan-out directly
 on the VM:</p>
 <pre><code>./scripts/deploy_targets.sh --inventory ./inventory --mode plan --parallel 10
@@ -604,14 +604,14 @@ offline.</p>
 <h3>Container</h3>
 <pre><code>cd /home/tpx-admin/snowcommander_scripts
 
-podman build -t snowcommander-docs:latest -f docs/Dockerfile docs/
+podman build -t sectools-docs:latest -f docs/Dockerfile docs/
 
-podman run -d --name snowcommander-docs \
+podman run -d --name sectools-docs \
   -p 8080:8080 \
   --read-only --tmpfs /tmp \
   --cap-drop ALL \
   --security-opt no-new-privileges \
-  snowcommander-docs:latest</code></pre>
+  sectools-docs:latest</code></pre>
 <p>Then browse <code>http://&lt;host&gt;:8080/</code>. Swap <code>podman</code>
 for <code>docker</code> if the daemon is running.</p>
 
@@ -706,7 +706,7 @@ password — should be rotated. The file is now mode 600 and gitignored, but any
 should be considered compromised.</div>
 
 <footer>
-Snow Commander &middot; <a href="https://github.com/Kiruthika-syk/Snowcommander-scripts">github.com/Kiruthika-syk/Snowcommander-scripts</a><br>
+RHEL Security Tools &middot; <a href="https://github.com/Kiruthika-syk/Snowcommander-scripts">github.com/Kiruthika-syk/Snowcommander-scripts</a><br>
 CrowdStrike Falcon 8.10.0-19402 &middot; Tanium Client 7.8.4.1298 &middot; 14 packages &middot; EL7–EL10 &middot; x86_64 + aarch64
 </footer>
 

@@ -169,8 +169,18 @@ die() { printf '%sERROR:%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 2; }
 # If the run ends before finalisation and we converted a template in place,
 # convert it back. Without this, any failure after stage 3 leaves the template
 # as a VM and an operator has to remember to fix it by hand.
+close_ssh_master() {
+  [[ -n "${CTRL_DIR:-}" && -d "$CTRL_DIR" ]] || return 0
+  # Tear the multiplexed connection down rather than leaving it for
+  # ControlPersist to expire.
+  ssh -o ControlPath="${CTRL_DIR}/ssh-%C" -O exit \
+    "${TARGET_SSH_USER}@${TARGET_HOST}" 2>/dev/null || true
+  rm -rf "$CTRL_DIR"
+}
+
 restore_template_on_exit() {
   local rc=$?
+  close_ssh_master
   if ((CONVERT_TO_TEMPLATE)) && ((TEMPLATE_CONVERTED)) && ((! FINALIZED)); then
     printf '\n%s[%s] run ended early (rc=%s) - restoring %s to template form%s\n' \
       "$C_YELLOW" "$(ts)" "$rc" "$created_vm" "$C_RESET"
@@ -240,12 +250,25 @@ fi
 SSH_BASE=()
 SSH_WRAP=()
 
+# Sudo on the target. Defaults to the SSH password, which is the common case
+# for these templates; override with SUDO_PASSWORD if they ever diverge.
+SUDO_PASSWORD="${SUDO_PASSWORD:-${SSHPASS:-}}"
+SUDO_NEEDS_PASSWORD=-1   # -1 unknown, 0 passwordless, 1 needs a password
+
+CTRL_DIR=""
 configure_ssh_auth() {
+  # Multiplex every connection over one authenticated master. Two reasons:
+  # sshpass cannot both answer the SSH prompt and let us pipe a sudo password
+  # through stdin, and re-authenticating on every call is slow.
+  CTRL_DIR="$(mktemp -d)"
   local common=(
     -o ConnectTimeout=15
     -o StrictHostKeyChecking=accept-new
     -o UserKnownHostsFile=/dev/null
     -o LogLevel=ERROR
+    -o ControlMaster=auto
+    -o ControlPath="${CTRL_DIR}/ssh-%C"
+    -o ControlPersist=600
   )
 
   if [[ -n "$TARGET_SSH_KEY" ]]; then
@@ -291,14 +314,37 @@ diagnose_ssh() {
 }
 
 rsh() { "${SSH_WRAP[@]}" ssh "${SSH_BASE[@]}" "${TARGET_SSH_USER}@${TARGET_HOST}" "$@"; }
-rsh_in() { "${SSH_WRAP[@]}" ssh "${SSH_BASE[@]}" "${TARGET_SSH_USER}@${TARGET_HOST}" "$@"; }
 
-# Run a command as root on the target, using sudo -n or sudo -S as available.
+# Once the multiplexed master is up, later connections reuse it and need no
+# sshpass wrapper, which frees stdin to carry the sudo password. BatchMode is
+# first so this fails fast instead of hanging on a prompt if the master is
+# somehow gone; ssh honours the first occurrence of an option.
+rsh_plain() {
+  ssh -o BatchMode=yes "${SSH_BASE[@]}" "${TARGET_SSH_USER}@${TARGET_HOST}" "$@"
+}
+
+# Run a command as root. Prefers passwordless sudo; falls back to feeding the
+# password on stdin, so it never appears in argv or the remote environment
+# where `ps` could read it.
 rsudo() {
-  if [[ -n "${SSHPASS:-}" && -z "$TARGET_SSH_KEY" ]]; then
-    rsh "sudo -n $* 2>/dev/null || { printf '%s\\n' \"\$SUDOPW\" | sudo -S -p '' $*; }"
-  else
+  if ((SUDO_NEEDS_PASSWORD == -1)); then
+    if rsh 'sudo -n true' 2>/dev/null; then
+      SUDO_NEEDS_PASSWORD=0
+      info "sudo: passwordless"
+    else
+      SUDO_NEEDS_PASSWORD=1
+      if [[ -z "$SUDO_PASSWORD" ]]; then
+        err "sudo needs a password but neither SUDO_PASSWORD nor SSHPASS is set"
+        return 1
+      fi
+      info "sudo: using a password on stdin"
+    fi
+  fi
+
+  if ((SUDO_NEEDS_PASSWORD == 0)); then
     rsh "sudo -n $*"
+  else
+    printf '%s\n' "$SUDO_PASSWORD" | rsh_plain "sudo -S -p '' $*"
   fi
 }
 
@@ -464,7 +510,9 @@ if ((PURGE_LEGACY)); then
     # Record what was there before removing it, so the log is auditable.
     rsh "ls -la ${legacy} 2>/dev/null | head -25" 2>/dev/null | sed 's/^/      /' || true
 
-    if rsudo "rm -rf ${legacy}" 2>/dev/null; then
+    # The directory normally belongs to the deployment user, so try without
+    # privilege first and only escalate if that is refused.
+    if rsh "rm -rf ${legacy}" 2>/dev/null || rsudo "rm -rf ${legacy}" 2>/dev/null; then
       if rsh "test -d ${legacy}" 2>/dev/null; then
         info "WARNING: ${resolved} still present after removal"
       else

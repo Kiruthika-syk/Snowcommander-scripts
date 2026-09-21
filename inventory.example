@@ -1,4 +1,4 @@
-# Snow Commander target inventory
+# Target inventory
 #
 # One hostname or IP per line. Blank lines and # comments are ignored.
 # Copy to a real file (for example ./inventory), which .gitignore excludes.

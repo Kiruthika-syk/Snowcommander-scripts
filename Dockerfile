@@ -1,5 +1,5 @@
 # ==============================================================================
-# Snow Commander security tools — deployment control plane
+# RHEL security tools — deployment control plane
 #
 # This container ORCHESTRATES installation onto remote RHEL-family servers over
 # SSH. It never runs a security agent itself, because every agent here is bound
@@ -13,13 +13,13 @@
 # x86_64 or aarch64, and none of that depends on this base image.
 #
 # Build:
-#   podman build -t snowcommander-deployer:latest .
-#   docker build  -t snowcommander-deployer:latest .
+#   podman build -t sectools-deployer:latest .
+#   docker build  -t sectools-deployer:latest .
 # ==============================================================================
 
 FROM almalinux:9
 
-LABEL org.opencontainers.image.title="snowcommander-deployer" \
+LABEL org.opencontainers.image.title="sectools-deployer" \
       org.opencontainers.image.description="SSH control plane for RHEL-family security tool deployment" \
       org.opencontainers.image.source="https://github.com/Kiruthika-syk/Snowcommander-scripts"
 

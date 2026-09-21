@@ -1,5 +1,5 @@
 # ==============================================================================
-# Snow Commander deployment control plane
+# RHEL security tools control plane
 #
 #   docker compose run --rm plan
 #   docker compose run --rm verify
@@ -12,7 +12,7 @@
 # ==============================================================================
 
 x-common: &common
-  image: snowcommander-deployer:latest
+  image: sectools-deployer:latest
   build:
     context: .
     dockerfile: Dockerfile
