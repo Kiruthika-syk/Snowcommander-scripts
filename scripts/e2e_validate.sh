@@ -439,7 +439,9 @@ info "remote platform: ${remote_os}"
 
 # Reuse this result rather than letting stage_bundle.sh probe again: its own
 # probe uses plain ssh with BatchMode, which cannot authenticate by password.
-read -r r_id r_major r_arch <<<"$remote_os"
+# Override the script-wide IFS, which excludes space and would otherwise put
+# the entire "rhel 9 x86_64" string into the first variable.
+IFS=' ' read -r r_id r_major r_arch <<<"$remote_os"
 if [[ -z "${r_major:-}" || -z "${r_arch:-}" ]]; then
   stage_fail "could not determine the remote platform (got '${remote_os}')"
 fi

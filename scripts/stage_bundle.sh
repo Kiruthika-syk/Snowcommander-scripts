@@ -76,7 +76,9 @@ if [[ -n "$PROBE" ]]; then
     err "  set SSHPASS for password auth, or use --el/--arch to skip probing"
     exit "$SECTOOLS_RC_USAGE"
   }
-  read -r probe_id probe_major probe_arch <<<"$probe_out"
+  # Explicit IFS: the script-wide value excludes space, which would collapse
+  # all three fields into the first variable.
+  IFS=' ' read -r probe_id probe_major probe_arch <<<"$probe_out"
 
   mapping="$(sectools_os_to_el "$probe_id" "$probe_major" "")" || {
     err "target ${PROBE} runs an unsupported OS (ID=${probe_id}, major=${probe_major})"
