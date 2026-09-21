@@ -87,14 +87,16 @@ UNINSTALL_COMPONENTS="${UNINSTALL_COMPONENTS:-tanium crowdstrike sentinel}"
 
 # What happens to securitytools.env when the run finishes.
 #
-#   sanitize (default)  keep the file with every non-secret value populated,
-#                       but blank the four real credentials. A clone then has
-#                       complete configuration and only needs secrets injected.
-#   keep                leave the file intact, credentials included. A clone is
-#                       immediately self-sufficient, at the cost of shipping
-#                       credentials inside every machine built from the template.
-#   shred               destroy the file entirely.
-ENV_DISPOSITION="${ENV_DISPOSITION:-sanitize}"
+#   keep (default)  leave the file complete, credentials included, so a VM
+#                   cloned from the template can install without any further
+#                   input. Note that the file is copied into every clone, so
+#                   the credentials exist on each of them; rotating any of
+#                   them means rebuilding the templates.
+#   sanitize        keep all non-secret configuration but blank the four
+#                   credentials, leaving a documented file to be completed at
+#                   deploy time from the environment or a secrets manager.
+#   shred           destroy the file entirely.
+ENV_DISPOSITION="${ENV_DISPOSITION:-keep}"
 
 # The only values that are genuinely credentials. Everything else in
 # securitytools.env is an identifier or plain configuration.
@@ -125,6 +127,10 @@ LEGACY_PATHS=(
   '/home/tpx-admin/2026snowcommander'
   '/root/2026snowcommander'
   '/opt/2026snowcommander'
+  # Paths used by earlier revisions of this harness, cleared so a target
+  # cannot accumulate several copies of the scripts and RPMs.
+  '/var/tmp/sectools'
+  '/opt/snowcommander'
 )
 
 TARGET_SSH_USER="${TARGET_SSH_USER:-tpx-admin}"
@@ -193,8 +199,14 @@ close_ssh_master() {
   rm -rf "$CTRL_DIR"
 }
 
+# Single EXIT handler. Everything that must happen on the way out goes here:
+# bash keeps only the most recently installed EXIT trap, so a second
+# 'trap ... EXIT' anywhere would silently discard the template restore.
+BUNDLE_FILE=""
+
 restore_template_on_exit() {
   local rc=$?
+  [[ -n "$BUNDLE_FILE" ]] && rm -f "$BUNDLE_FILE"
   close_ssh_master
   if ((CONVERT_TO_TEMPLATE)) && ((TEMPLATE_CONVERTED)) && ((! FINALIZED)); then
     printf '\n%s[%s] run ended early (rc=%s) - restoring %s to template form%s\n' \
@@ -552,7 +564,9 @@ echo
 
 info "building a bundle matched to this host"
 bundle="$(mktemp --suffix=.tar.gz)"
-trap 'rm -f "$bundle"' EXIT
+# Registered with the single EXIT handler rather than a second trap, which
+# would replace it and lose the template restore.
+BUNDLE_FILE="$bundle"
 
 info "building for el${r_major} ${r_arch}"
 if ! "${BASE_DIR}/scripts/stage_bundle.sh" \
@@ -583,6 +597,28 @@ place "chown -R ${TARGET_SSH_USER}: ${REMOTE_DIR} 2>/dev/null || true" 2>/dev/nu
 placed="$(rsh "find ${REMOTE_DIR} -type f | wc -l" 2>/dev/null || echo 0)"
 info "files placed: ${placed}"
 rsh "ls -la ${REMOTE_DIR}" 2>/dev/null | sed 's/^/    /' || true
+
+# The directory was removed and recreated, so it should contain exactly the
+# bundle. Compare against the archive to prove nothing stale survived.
+expected="$(tar -tzf "$bundle" | sed 's|^\./||' | grep -v '/$' | grep -v '^$' | sort)"
+actual="$(rsh "cd ${REMOTE_DIR} && find . -type f | sed 's|^\./||' | sort" 2>/dev/null || true)"
+extra="$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") 2>/dev/null || true)"
+missing="$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") 2>/dev/null || true)"
+
+if [[ -n "$extra" ]]; then
+  info "WARNING: files present that were not in the bundle:"
+  printf '%s\n' "$extra" | sed 's/^/      /'
+else
+  info "verified: directory contains only the pushed bundle"
+fi
+[[ -n "$missing" ]] && { info "WARNING: bundle files missing on the target:"; printf '%s\n' "$missing" | sed 's/^/      /'; }
+
+echo
+echo "    --- RPMs now on the target ---"
+rsh "find ${REMOTE_DIR} -name '*.rpm' -printf '%p  %s bytes\n' 2>/dev/null || true" 2>/dev/null | sed 's/^/      /'
+echo "    --- any stray RPMs elsewhere in the home directory ---"
+rsh "find \$HOME -name 'falcon-sensor*.rpm' -o -name 'TaniumClient*.rpm' 2>/dev/null \
+     | grep -v '^${REMOTE_DIR}' || echo 'none'" 2>/dev/null | sed 's/^/      /'
 
 # Secrets go on their own channel into a 0600 file.
 envfile="$(mktemp)"
