@@ -105,6 +105,37 @@
   hr{border:0;border-top:1px solid var(--line);margin:34px 0}
   .meta{font-size:12px;color:var(--faint);font-family:var(--mono)}
   footer{margin-top:60px;padding-top:18px;border-top:1px solid var(--line);font-size:12px;color:var(--faint)}
+
+  .dl-btn{display:block;margin:14px 16px 0;padding:9px 12px;border-radius:6px;
+          background:var(--accent);color:#0b0d11 !important;font-size:13px;font-weight:600;
+          text-align:center;border:1px solid #3d8fd9}
+  .dl-btn:hover{background:#79bbff;text-decoration:none}
+  .dl-btn svg{display:inline-block;width:14px;height:14px;margin-right:6px;vertical-align:-2px;fill:currentColor}
+  .hero-dl{display:inline-flex;align-items:center;gap:8px;margin:10px 0 18px;padding:8px 14px;
+           border-radius:6px;border:1px solid var(--line);background:var(--panel);
+           color:var(--fg);font-size:13.5px;font-weight:500}
+  .hero-dl:hover{border-color:var(--accent);text-decoration:none;color:var(--accent)}
+  .hero-dl svg{width:15px;height:15px;fill:currentColor;flex:0 0 auto}
+
+  @media print{
+    nav,.dl-btn,.hero-dl{display:none !important}
+    .wrap{display:block}
+    main{max-width:none;padding:16px 24px 40px}
+    body{background:#fff;color:#111;font-size:12pt;line-height:1.5}
+    h1{font-size:22pt;color:#000}
+    h2{font-size:15pt;color:#000;border-color:#ccc;page-break-after:avoid}
+    h3{color:#222;page-break-after:avoid}
+    p,.lede,.meta{color:#222}
+    .lede{font-size:12pt}
+    code,pre{font-size:9pt}
+    pre{background:#f4f4f4;border-color:#ccc;color:#111}
+    table,tr,td,th{page-break-inside:avoid}
+    th{color:#444}
+    .note,.card,.lane,.node,.flow-box{background:#f8f8f8;border-color:#ccc;color:#111}
+    .flow{background:#f4f4f4;color:#222}
+    a{color:#0055aa;text-decoration:none}
+    footer{border-color:#ccc;color:#555}
+  }
   @media(max-width:900px){nav{display:none}main{padding:26px 20px 80px}}
 </style>
 </head>
@@ -140,6 +171,10 @@
   <a href="#exit">Exit codes</a>
   <a href="#trouble">Troubleshooting</a>
   <a href="#security">Security</a>
+  <a class="dl-btn" href="guide.pdf" download="RHEL-Security-Tools-Guide.pdf">
+    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1v9M4 7l4 4 4-4M2 13h12v2H2z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    Download Guide (PDF)
+  </a>
 </nav>
 
 <main>
@@ -148,6 +183,10 @@
 <p class="lede">Automated deployment, validation and teardown of enterprise security tooling across
 Red Hat Enterprise Linux estates — from a vSphere template to a verified host, with every step logged.</p>
 <p class="meta">CrowdStrike Falcon 8.10.0-19402 &middot; Tanium Client 7.8.4.1298 &middot; EL7–EL10 &middot; x86_64 + aarch64</p>
+<a class="hero-dl" href="guide.pdf" download="RHEL-Security-Tools-Guide.pdf">
+  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1v9M4 7l4 4 4-4M2 13h12v2H2z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  Download the full guide as PDF
+</a>
 
 <h2 id="overview">Overview</h2>
 <p>This tooling installs and verifies five security components on RHEL-family servers. It grew out of a
@@ -543,7 +582,7 @@ template on one site with <code>./target.sh e2e-site fw --template-cycle</code>.
 <tr><td><code>BLR-GI-7.3</code></td><td>x86_64</td><td>Vocera / GI appliance</td><td>RHEL 7.x</td><td>remove</td></tr>
 </tbody>
 </table>
-<p class="meta">vCenter: blr-vsphere-01.strykercorp.com · portgroup: VM Network</p>
+<p class="meta">vCenter: blr-vsphere-01.strykercorp.com · portgroup: VLAN-126 · FQDN: vcraeng.com</p>
 
 <div class="note"><b>Package picked per detected EL + arch.</b> A GI template on RHEL 7.9 x86_64 receives
 <code>falcon-sensor-*-el7.x86_64.rpm</code> and the glibc2.17 Tanium x86_64 build, regardless of the
@@ -805,7 +844,8 @@ git push -u origin fix/whatever</code></pre>
 <h2 id="hosting">Host this site</h2>
 <p>This page is a single self-contained HTML file with no external scripts,
 styles, fonts or images, so any static web server can serve it and it works
-offline.</p>
+offline. A printable PDF copy lives at <a href="guide.pdf" download="RHEL-Security-Tools-Guide.pdf"><code>guide.pdf</code></a>
+— regenerate it after editing with <code>docs/build-guide-pdf.sh</code>.</p>
 
 <h3>Container</h3>
 <pre><code>cd /home/tpx-admin/snowcommander_scripts
@@ -912,7 +952,8 @@ password — should be rotated. The file is now mode 600 and gitignored, but any
 should be considered compromised.</div>
 
 <footer>
-RHEL Security Tools &middot; <a href="https://github.com/Kiruthika-syk/Snowcommander-scripts">github.com/Kiruthika-syk/Snowcommander-scripts</a><br>
+RHEL Security Tools &middot; <a href="https://github.com/Kiruthika-syk/Snowcommander-scripts">github.com/Kiruthika-syk/Snowcommander-scripts</a>
+&middot; <a href="guide.pdf" download="RHEL-Security-Tools-Guide.pdf">Download PDF guide</a><br>
 CrowdStrike Falcon 8.10.0-19402 &middot; Tanium Client 7.8.4.1298 &middot; 14 packages &middot; EL7–EL10 &middot; x86_64 + aarch64
 </footer>
 

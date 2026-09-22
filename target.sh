@@ -41,13 +41,13 @@ declare -A SITE_VCENTER=(
 )
 
 declare -A SITE_PORTGROUP=(
-  [blr]="${BLR_PORTGROUP:-VM Network}"
+  [blr]="${BLR_PORTGROUP:-VLAN-126}"
   [fw]="${FW_PORTGROUP:-fwa-vlan106}"
   [stc]="${STC_PORTGROUP:-VM Network}"
 )
 
 declare -A SITE_FQDN=(
-  [blr]=""
+  [blr]="${BLR_FQDN_DOMAIN:-vcraeng.com}"
   [fw]="${FW_FQDN_DOMAIN:-vcraeng.com}"
   [stc]=""
 )
