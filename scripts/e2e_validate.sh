@@ -78,6 +78,8 @@ KEEP_VM=0
 IP_TIMEOUT=300
 # sshd often starts after VMware Tools first reports an address.
 SSH_WAIT="${SSH_WAIT:-120}"
+# Extra wait after the in-guest sshd remedy (GI templates can be slow).
+SSH_RETRY_AFTER_REMEDY="${SSH_RETRY_AFTER_REMEDY:-180}"
 COMPONENTS=all
 
 # Which components stage 7 tears down. The three agents are removed; the
@@ -368,6 +370,23 @@ configure_ssh_auth() {
 }
 
 # Report why a connection failed instead of just that it did.
+attempt_guest_ssh_remedy() {
+  local vm_name="$1"
+  [[ -n "$vm_name" && -n "${VCENTER:-}" ]] || return 1
+  [[ -n "${SSHPASS:-}" || -n "${TARGET_SSH_KEY:-}" ]] || return 1
+  info "port 22 closed — applying in-guest sshd_config remedy via VMware Guest Operations"
+  local -a args=(--vcenter "$VCENTER" --guest-remedy-ssh --vm-name "$vm_name")
+  [[ -n "$INSECURE" ]] && args+=("$INSECURE")
+  local rc=0
+  python3 "${BASE_DIR}/scripts/vsphere_provision.py" "${args[@]}" 2>&1 | sed 's/^/    /' || rc=$?
+  if ((rc == 0)); then
+    info "guest SSH remedy finished"
+    return 0
+  fi
+  info "WARNING: guest SSH remedy failed"
+  return 1
+}
+
 diagnose_ssh() {
   local host="$1" out
   info "diagnosing the SSH failure"
@@ -548,6 +567,19 @@ while ((SECONDS < ssh_deadline)); do
   fi
   sleep 5
 done
+
+if ((! ssh_ok)) && [[ -n "${created_vm:-}" ]]; then
+  attempt_guest_ssh_remedy "$created_vm" || true
+  info "retrying SSH for up to ${SSH_RETRY_AFTER_REMEDY}s after guest remedy"
+  retry_deadline=$((SECONDS + SSH_RETRY_AFTER_REMEDY))
+  while ((SECONDS < retry_deadline)); do
+    if rsh true 2>/dev/null; then
+      ssh_ok=1
+      break
+    fi
+    sleep 5
+  done
+fi
 
 if ((! ssh_ok)); then
   diagnose_ssh "$TARGET_HOST"

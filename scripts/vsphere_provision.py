@@ -31,18 +31,21 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import base64
 import json
 import os
 import re
+import shlex
 import ssl
 import sys
 import time
+import urllib.request
 
 from pyVim import connect
 from pyVmomi import vim, vmodl
 
 RC_OK, RC_USAGE, RC_CONNECT, RC_NOTFOUND, RC_CLONE, RC_POWER = 0, 2, 3, 4, 5, 6
-RC_SCOPE = 7
+RC_SCOPE, RC_GUEST = 7, 8
 
 # ----------------------------------------------------------------------------
 # Hard scope guardrail.
@@ -489,6 +492,221 @@ def power_on_and_wait(vm, timeout: int):
 
 
 # ----------------------------------------------------------------------------
+# Guest-side SSH remedy — used when VMware Tools reports an IP but port 22 is
+# closed. Runs inside the guest via Guest Operations (no SSH required).
+# ----------------------------------------------------------------------------
+SSH_REMEDY_LOG = "/tmp/sectools-sshd-remedy.log"
+
+SSH_REMEDY_SCRIPT = fr"""set -euo pipefail
+LOG={SSH_REMEDY_LOG}
+exec >>"$LOG" 2>&1
+echo "=== sshd remedy $(date -Iseconds 2>/dev/null || date) ==="
+
+SSHD=/etc/ssh/sshd_config
+test -f "$SSHD" || {{ echo "sshd_config missing"; exit 1; }}
+cp -a "$SSHD" "${{SSHD}}.sectools-bak.$(date +%s)" 2>/dev/null || true
+
+if grep -qE '^[[:space:]]*Port[[:space:]]' "$SSHD"; then
+  sed -i 's/^[[:space:]]*Port[[:space:]].*/Port 22/' "$SSHD"
+else
+  printf '\nPort 22\n' >> "$SSHD"
+fi
+sed -i '/^[[:space:]]*ListenAddress[[:space:]]/d' "$SSHD"
+if test -d /etc/ssh/sshd_config.d; then
+  for dropin in /etc/ssh/sshd_config.d/*.conf; do
+    test -f "$dropin" || continue
+    sed -i '/^[[:space:]]*ListenAddress[[:space:]]/d' "$dropin" 2>/dev/null || true
+  done
+fi
+if grep -qE '^[[:space:]]*#?[[:space:]]*PasswordAuthentication[[:space:]]' "$SSHD"; then
+  sed -i 's/^[[:space:]]*#\?[[:space:]]*PasswordAuthentication[[:space:]].*/PasswordAuthentication yes/' "$SSHD"
+else
+  printf 'PasswordAuthentication yes\n' >> "$SSHD"
+fi
+
+if command -v restorecon >/dev/null 2>&1; then
+  restorecon -R /etc/ssh 2>/dev/null || true
+fi
+
+if ! test -x /usr/sbin/sshd; then
+  echo "openssh-server missing; attempting install"
+  if command -v yum >/dev/null 2>&1; then
+    yum install -y openssh-server || true
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y openssh-server || true
+  fi
+fi
+/usr/sbin/sshd -t
+
+start_sshd() {{
+  local svc="$1"
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl enable "$svc" 2>/dev/null || true
+    systemctl restart "$svc" 2>/dev/null || systemctl start "$svc"
+    systemctl is-active --quiet "$svc"
+    return
+  fi
+  if command -v chkconfig >/dev/null 2>&1; then
+    chkconfig "$svc" on 2>/dev/null || chkconfig --level 2345 "$svc" on 2>/dev/null || true
+  fi
+  if command -v service >/dev/null 2>&1; then
+    service "$svc" restart 2>/dev/null || service "$svc" start
+    service "$svc" status >/dev/null 2>&1
+    return
+  fi
+  /etc/init.d/"$svc" restart 2>/dev/null || /etc/init.d/"$svc" start
+}}
+
+started=0
+for svc in sshd ssh; do
+  if start_sshd "$svc" 2>/dev/null; then
+    echo "started service: $svc"
+    started=1
+    break
+  fi
+done
+if (( ! started )); then
+  echo "ERROR: could not start sshd or ssh service" >&2
+  systemctl status sshd 2>&1 || service sshd status 2>&1 || true
+  exit 1
+fi
+
+if command -v firewall-cmd >/dev/null 2>&1 \
+    && systemctl is-active firewalld >/dev/null 2>&1; then
+  firewall-cmd --permanent --add-service=ssh 2>/dev/null || true
+  firewall-cmd --reload 2>/dev/null || true
+fi
+
+if command -v iptables >/dev/null 2>&1; then
+  iptables -C INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null \
+    || iptables -I INPUT 1 -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
+  if test -w /etc/sysconfig/iptables; then
+    iptables-save > /etc/sysconfig/iptables 2>/dev/null || true
+  elif command -v service >/dev/null 2>&1; then
+    service iptables save 2>/dev/null || true
+  fi
+fi
+
+listening() {{
+  local lines
+  lines="$(ss -lntp 2>/dev/null || netstat -lntp 2>/dev/null || true)"
+  printf '%s\n' "$lines" | grep -qE '0\.0\.0\.0:22|\*:22|\[::\]:22|:::22' \
+    || {{ printf '%s\n' "$lines" | grep -qE ':(22|ssh)[[:space:]]' \
+         && ! printf '%s\n' "$lines" | grep -qE '127\.0\.0\.1:22'; }}
+}}
+
+for _ in $(seq 1 15); do
+  if listening; then
+    ss -lntp 2>/dev/null | grep -E ':(22|ssh)[[:space:]]' \
+      || netstat -lntp 2>/dev/null | grep -E ':(22|ssh)[[:space:]]' || true
+    echo "sshd listening on port 22"
+    exit 0
+  fi
+  sleep 2
+done
+
+echo "ERROR: sshd is not listening on port 22 after remedy" >&2
+systemctl status sshd 2>&1 || service sshd status 2>&1 || true
+iptables -L INPUT -n 2>/dev/null | head -20 || true
+exit 1
+"""
+
+
+def find_vm_by_name(content, name: str):
+    """Return a powered-on VM in scope, or None."""
+    for vm, props in bulk_fetch(content, content.rootFolder, vim.VirtualMachine,
+                                ["name", "config.template"]):
+        if props.get("name") != name or props.get("config.template"):
+            continue
+        enforce_scope(vm, folder_path(vm))
+        return vm
+    return None
+
+
+def wait_for_guest_tools(vm, timeout: int = 180) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        status = getattr(vm.guest, "toolsRunningStatus", None)
+        if status == "guestToolsRunning":
+            return True
+        time.sleep(3)
+    return False
+
+
+def guest_read_file(content, vm, auth, guest_path: str) -> str:
+    """Fetch a small guest file via VMware Guest File Transfer."""
+    fm = content.guestOperationsManager.fileManager
+    try:
+        info = fm.InitiateFileTransferFromGuest(
+            vm=vm, auth=auth, guestFilePath=guest_path)
+        with urllib.request.urlopen(info.url, timeout=30) as resp:
+            return resp.read().decode("utf-8", errors="replace")
+    except Exception as exc:  # noqa: BLE001
+        log("GUEST SSH", f"could not read {guest_path}: {exc}")
+        return ""
+
+
+def guest_remedy_ssh(content, vm_name: str, guest_user: str, guest_pass: str,
+                      sudo_pass: str | None) -> None:
+    vm = find_vm_by_name(content, vm_name)
+    if vm is None:
+        fail(RC_NOTFOUND, f"VM '{vm_name}' not found inside {ALLOWED_FOLDER_LABEL}")
+
+    if vm.runtime.powerState != vim.VirtualMachinePowerState.poweredOn:
+        fail(RC_GUEST, f"VM '{vm_name}' is not powered on")
+
+    log("GUEST SSH", f"waiting for VMware Tools on '{vm_name}'")
+    if not wait_for_guest_tools(vm):
+        fail(RC_GUEST, "VMware Tools is not running; cannot apply in-guest SSH remedy")
+
+    auth = vim.vm.guest.NamePasswordAuthentication(
+        username=guest_user, password=guest_pass, interactiveSession=False)
+    pm = content.guestOperationsManager.processManager
+
+    encoded = base64.b64encode(SSH_REMEDY_SCRIPT.encode()).decode()
+    runner = f"echo {encoded} | base64 -d | /bin/bash"
+    if sudo_pass:
+        inner = (
+            f": > {shlex.quote(SSH_REMEDY_LOG)}; "
+            f"printf '%s\\n' {shlex.quote(sudo_pass)} | sudo -S -p '' "
+            f"/bin/bash -c {shlex.quote(runner)}"
+        )
+    else:
+        inner = (
+            f": > {shlex.quote(SSH_REMEDY_LOG)}; "
+            f"sudo -n /bin/bash -c {shlex.quote(runner)}"
+        )
+
+    spec = vim.vm.guest.ProcessManager.ProgramSpec(
+        programPath="/bin/bash", arguments=f"-lc {shlex.quote(inner)}")
+    log("GUEST SSH", f"applying sshd_config remedy as {guest_user} via Guest Operations")
+    try:
+        pid = pm.StartProgramInGuest(vm=vm, auth=auth, spec=spec)
+    except vim.fault.InvalidGuestLogin:
+        fail(RC_GUEST, f"guest login failed for user '{guest_user}'")
+    except Exception as exc:  # noqa: BLE001
+        fail(RC_GUEST, f"Guest Operations failed: {exc}")
+
+    log("GUEST SSH", f"remedy started (pid={pid}); waiting for completion")
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        info = pm.ListProcessesInGuest(vm=vm, auth=auth, pids=[pid])
+        if info and info[0].endTime:
+            rc = info[0].exitCode
+            if rc == 0:
+                log("GUEST SSH", "sshd remedy completed successfully")
+                return
+            detail = guest_read_file(content, vm, auth, SSH_REMEDY_LOG)
+            if detail:
+                log("GUEST SSH", "remedy log from the guest:")
+                for line in detail.strip().splitlines()[-40:]:
+                    log("GUEST SSH", f"  {line}")
+            fail(RC_GUEST, f"sshd remedy exited with status {rc}")
+        time.sleep(2)
+    fail(RC_GUEST, "timed out waiting for sshd remedy to finish")
+
+
+# ----------------------------------------------------------------------------
 def main() -> int:
     p = argparse.ArgumentParser(description="vSphere stages of the validation harness")
     p.add_argument("--vcenter", required=True)
@@ -510,6 +728,9 @@ def main() -> int:
                    help="skip TLS verification (common for internal vCenters)")
     p.add_argument("--ip-timeout", type=int, default=300)
     p.add_argument("--no-power-on", action="store_true")
+    p.add_argument("--guest-remedy-ssh", action="store_true",
+                   help="fix sshd_config and start sshd via VMware Guest Operations")
+    p.add_argument("--vm-name", help="target VM name for --guest-remedy-ssh")
     args = p.parse_args()
 
     # Validate destructive intent before opening a connection, so the run
@@ -542,6 +763,19 @@ def main() -> int:
 
     if args.list_templates:
         list_templates(content, args.folder)
+        return RC_OK
+
+    if args.guest_remedy_ssh:
+        vm_name = args.vm_name or args.name
+        if not vm_name:
+            fail(RC_USAGE, "--vm-name is required with --guest-remedy-ssh")
+        guest_user = os.environ.get("TARGET_SSH_USER", "tpx-admin")
+        guest_pass = os.environ.get("SSHPASS", "")
+        if not guest_pass:
+            fail(RC_USAGE, "set SSHPASS for guest SSH remedy")
+        sudo_pass = os.environ.get("SUDO_PASSWORD") or guest_pass
+        guest_remedy_ssh(content, vm_name, guest_user, guest_pass, sudo_pass)
+        print(json.dumps({"vm_name": vm_name, "ssh_remedy": "applied"}))
         return RC_OK
 
     if not args.template:
