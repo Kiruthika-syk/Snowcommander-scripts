@@ -551,8 +551,8 @@ full EL × arch matrix.</p>
 and non-empty, header parseable, package name matches, architecture installable, payload digests verify.</p>
 
 <h2 id="templates">vSphere templates — FW, BLR &amp; STC</h2>
-<p>FW and BLR each have six templates under <code>SnowCommander/Template(s)</code>. STC uses the
-<code>SC-</code> prefix with spaces in names (e.g. <code>SC-Redhat 9</code>) and a different inventory.
+<p>FW and BLR each have six templates under <code>SnowCommander/Template(s)</code>. STC is scoped to
+a single RHEL target: <code>SC-Redhat 9</code> (quote the name — it contains a space).
 All current golden images are <b>x86_64</b>. The harness detects the real OS and architecture at
 runtime — never from the template name.</p>
 
@@ -595,8 +595,8 @@ template on one site with <code>./target.sh e2e-site fw --template-cycle</code>.
 </tbody>
 </table>
 <p class="meta">vCenter: stc-vsphere-01.strykercorp.com · portgroup: stc-vlan847 · FQDN: none</p>
-<p class="meta">Folder: <code>IT/SnowComander/Templates</code>. Quote names with spaces.
-Run <code>./target.sh list-vcenter stc</code> to see templates and any VMs mid-cycle.</p>
+<p class="meta">Folder: <code>IT/SnowComander/Templates</code>.
+Run <code>./target.sh list-vcenter stc</code> or <code>./target.sh e2e-stc --template-cycle</code>.</p>
 
 <div class="note"><b>Package picked per detected EL + arch.</b> A GI template on RHEL 7.9 x86_64 receives
 <code>falcon-sensor-*-el7.x86_64.rpm</code> and the glibc2.17 Tanium x86_64 build, regardless of the
@@ -750,10 +750,10 @@ object in the inventory afterwards.</p>
 <h4>BLR — one template</h4>
 <pre><code>./target.sh e2e blr BLR-GI-6.6 --template-cycle</code></pre>
 
-<h4>STC — one template</h4>
-<pre><code>./target.sh e2e stc 'SC-Redhat 9' --template-cycle</code></pre>
-<p>STC template names use the <code>SC-</code> prefix and spaces (e.g. <code>SC-Redhat 9</code>).
-Always quote names that contain spaces.</p>
+<h4>STC — SC-Redhat 9</h4>
+<pre><code>./target.sh e2e-stc --template-cycle</code></pre>
+<p>Shortcut for the only STC RHEL template. Equivalent to
+<code>./target.sh e2e stc 'SC-Redhat 9' --template-cycle</code>.</p>
 
 <h4>Explicit form (same thing, all flags visible)</h4>
 <pre><code>./scripts/e2e_validate.sh \
@@ -816,8 +816,8 @@ must never run at once, and the address must be free before you start.</div>
 <span class="cmt"># All six BLR templates</span>
 ./target.sh e2e-site blr --template-cycle
 
-<span class="cmt"># STC (currently SC-Redhat 9 only)</span>
-./target.sh e2e-site stc --template-cycle
+<span class="cmt"># STC — SC-Redhat 9 only</span>
+./target.sh e2e-stc --template-cycle
 
 <span class="cmt"># Watch a run in progress</span>
 tail -f /tmp/e2e-fw-FW-GI-7.3.log</code></pre>

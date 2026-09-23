@@ -285,11 +285,14 @@ def scan_folder_vms(content):
     return rows
 
 
-def list_templates(content, folder_filter: str | None) -> None:
+def list_templates(content, folder_filter: str | None,
+                   list_name: str | None = None) -> None:
     """List templates (and in-scope VMs) inside the permitted folder."""
     rows = scan_folder_vms(content)
     if folder_filter:
         rows = [r for r in rows if folder_filter.lower() in (r[3] or "").lower()]
+    if list_name:
+        rows = [r for r in rows if r[1] == list_name]
 
     templates = [r for r in rows if r[4]]
     vms = [r for r in rows if not r[4]]
@@ -749,6 +752,8 @@ def main() -> int:
     p.add_argument("--datastore")
     p.add_argument("--resource-pool")
     p.add_argument("--list-templates", action="store_true")
+    p.add_argument("--list-name",
+                   help="with --list-templates, show only this exact VM/template name")
     p.add_argument("--list-folders", action="store_true",
                    help="print the VM folder hierarchy to discover the real layout")
     p.add_argument("--finalize", metavar="VM_NAME",
@@ -791,7 +796,7 @@ def main() -> int:
         return RC_OK
 
     if args.list_templates:
-        list_templates(content, args.folder)
+        list_templates(content, args.folder, args.list_name)
         return RC_OK
 
     if args.guest_remedy_ssh:

@@ -61,12 +61,10 @@ SITE_TEMPLATES_fw=(
   FW-Redhat-9 FW-Redhat-10
   FW-GI-6.6 FW-GI-7.1 FW-GI-7.2 FW-GI-7.3
 )
-# STC vCenter uses SC-* names with spaces (not STC-*). Inventory from
-# IT/SnowComander/Templates — only RHEL security-tool targets are listed here.
-# Other objects in that folder (Windows templates, demo-7.2) are excluded.
-# Confirm live inventory: ./target.sh list-vcenter stc
+# STC — single RHEL security-tools template (name has a space; always quote it).
+STC_TEMPLATE='SC-Redhat 9'
 SITE_TEMPLATES_stc=(
-  'SC-Redhat 9'
+  "$STC_TEMPLATE"
 )
 
 log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
@@ -82,6 +80,7 @@ Commands:
   list-folders <site>          list folders under SnowCommander (diagnostics)
 
   e2e <site> <template>        validate one template (clone mode by default)
+  e2e-stc                      validate STC SC-Redhat 9 (template-cycle default)
   e2e-site <site>              validate every template on one vCenter
   e2e-all-sites                validate all sites (background jobs, one log each)
   existing <hostname>          run stages 4-8 on a host that already exists
@@ -106,7 +105,7 @@ Examples:
   set -a; source ~/.snowcommander-creds.env; set +a
   ./target.sh list
   ./target.sh e2e fw FW-Redhat-9 --template-cycle --insecure
-  ./target.sh e2e stc 'SC-Redhat 9' --template-cycle --insecure
+  ./target.sh e2e-stc --template-cycle --insecure
   ./target.sh e2e-site blr --template-cycle --insecure
   ./target.sh write-inventory && ./target.sh plan
   ./target.sh container deploy
@@ -213,6 +212,9 @@ cmd_list_vcenter() {
   site="$(resolve_site "${1:?usage: list-vcenter <blr|fw|stc>}")"
   load_creds
   local -a args=(--vcenter "${SITE_VCENTER[$site]}" --list-templates)
+  if [[ "$site" == "stc" ]]; then
+    args+=(--list-name "$STC_TEMPLATE")
+  fi
   (( E2E_INSECURE )) && args+=(--insecure)
   exec python3 "${BASE_DIR}/scripts/vsphere_provision.py" "${args[@]}"
 }
@@ -380,6 +382,14 @@ main() {
       parse_common_opts "$@"
       (( E2E_INSECURE )) || E2E_EXTRA+=(--insecure)
       run_e2e "$site" "$template"
+      ;;
+    e2e-stc)
+      shift || true
+      load_creds
+      E2E_TEMPLATE_CYCLE=1
+      parse_common_opts "$@"
+      (( E2E_INSECURE )) || E2E_EXTRA+=(--insecure)
+      run_e2e stc "$STC_TEMPLATE"
       ;;
     e2e-site) load_creds; cmd_e2e_site "$@" ;;
     e2e-all-sites) cmd_e2e_all_sites "$@" ;;
