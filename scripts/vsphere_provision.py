@@ -266,21 +266,50 @@ def scan_templates(content):
     return rows
 
 
+def scan_folder_vms(content):
+    """Return [(vm, name, guest_os, path, is_template)] for VMs in scope."""
+    folder, folder_full = find_templates_folder(content)
+    container = folder or content.rootFolder
+    found = bulk_fetch(content, container, vim.VirtualMachine,
+                       ["name", "config.template", "config.guestFullName"])
+    rows = []
+    for vm, props in found:
+        path = folder_full if folder is not None else folder_path(vm)
+        if not ALLOWED_FOLDER_RE.search(normalise_path(path or "")):
+            continue
+        rows.append((vm,
+                     props.get("name", "?"),
+                     props.get("config.guestFullName") or "unknown",
+                     path,
+                     bool(props.get("config.template"))))
+    return rows
+
+
 def list_templates(content, folder_filter: str | None) -> None:
-    """Only ever lists templates inside the permitted folder."""
-    rows = scan_templates(content)
+    """List templates (and in-scope VMs) inside the permitted folder."""
+    rows = scan_folder_vms(content)
     if folder_filter:
         rows = [r for r in rows if folder_filter.lower() in (r[3] or "").lower()]
 
+    templates = [r for r in rows if r[4]]
+    vms = [r for r in rows if not r[4]]
+
     if not rows:
-        log("2/8 TEMPLATE", f"no templates found inside {ALLOWED_FOLDER_LABEL}")
+        log("2/8 TEMPLATE", f"nothing found inside {ALLOWED_FOLDER_LABEL}")
         return
 
-    print(f"{'TEMPLATE':<34} {'GUEST OS':<44} FOLDER", file=sys.stderr)
-    print("-" * 110, file=sys.stderr)
-    for _vm, name, guest, path in sorted(rows, key=lambda r: r[1]):
-        print(f"{name:<34} {guest:<44} {path}", file=sys.stderr)
-    log("2/8 TEMPLATE", f"{len(rows)} template(s) in scope")
+    print(f"{'NAME':<34} {'KIND':<10} {'GUEST OS':<44} FOLDER", file=sys.stderr)
+    print("-" * 120, file=sys.stderr)
+    for _vm, name, guest, path, is_template in sorted(rows, key=lambda r: r[1]):
+        kind = "template" if is_template else "vm"
+        print(f"{name:<34} {kind:<10} {guest:<44} {path}", file=sys.stderr)
+
+    if templates:
+        log("2/8 TEMPLATE", f"{len(templates)} template(s) in scope")
+    else:
+        log("2/8 TEMPLATE",
+            f"no templates in scope ({len(vms)} VM(s) — likely mid template-cycle; "
+            f"--template-cycle reuses a VM with the same name)")
 
 
 def find_template(content, name: str, folder_filter: str | None):

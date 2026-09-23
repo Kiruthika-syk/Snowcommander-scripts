@@ -550,10 +550,11 @@ full EL × arch matrix.</p>
 <p>Every candidate must pass all five checks or the run aborts before the host is modified: file present
 and non-empty, header parseable, package name matches, architecture installable, payload digests verify.</p>
 
-<h2 id="templates">vSphere templates — FW &amp; BLR</h2>
-<p>Six templates per site live under <code>SnowCommander/Template(s)</code>. All twelve current golden
-images are <b>x86_64</b>. The harness detects the real OS and architecture at runtime — never from the
-template name.</p>
+<h2 id="templates">vSphere templates — FW, BLR &amp; STC</h2>
+<p>FW and BLR each have six templates under <code>SnowCommander/Template(s)</code>. STC uses the
+<code>SC-</code> prefix with spaces in names (e.g. <code>SC-Redhat 9</code>) and a different inventory.
+All current golden images are <b>x86_64</b>. The harness detects the real OS and architecture at
+runtime — never from the template name.</p>
 
 <p>Configured in <code>target.sh</code>. List them with <code>./target.sh list</code>; validate every
 template on one site with <code>./target.sh e2e-site fw --template-cycle</code>.</p>
@@ -585,6 +586,17 @@ template on one site with <code>./target.sh e2e-site fw --template-cycle</code>.
 </tbody>
 </table>
 <p class="meta">vCenter: blr-vsphere-01.strykercorp.com · portgroup: VLAN-126 · FQDN: vcraeng.com</p>
+
+<h3>St Cloud (STC)</h3>
+<table>
+<thead><tr><th>Template</th><th>Architecture</th><th>Type</th><th>Typical guest OS</th><th>RHSM after cycle</th></tr></thead>
+<tbody>
+<tr><td><code>SC-Redhat 9</code></td><td>x86_64</td><td>Red Hat base</td><td>RHEL 9</td><td>keep</td></tr>
+</tbody>
+</table>
+<p class="meta">vCenter: stc-vsphere-01.strykercorp.com · portgroup: stc-vlan847 · FQDN: none</p>
+<p class="meta">Folder: <code>IT/SnowComander/Templates</code>. Quote names with spaces.
+Run <code>./target.sh list-vcenter stc</code> to see templates and any VMs mid-cycle.</p>
 
 <div class="note"><b>Package picked per detected EL + arch.</b> A GI template on RHEL 7.9 x86_64 receives
 <code>falcon-sensor-*-el7.x86_64.rpm</code> and the glibc2.17 Tanium x86_64 build, regardless of the
@@ -704,11 +716,11 @@ to hostnames in an inventory file — it never talks to vCenter.</div>
 <p><code>target.sh</code> knows three sites. Portgroups and FQDN defaults are baked in; override with
 <code>--portgroup</code> or environment variables (<code>BLR_PORTGROUP</code>, <code>FW_FQDN_DOMAIN</code>, …).</p>
 <table>
-<thead><tr><th>Site</th><th>vCenter</th><th>Default portgroup</th><th>FQDN</th><th>Templates (6 each)</th></tr></thead>
+<thead><tr><th>Site</th><th>vCenter</th><th>Default portgroup</th><th>FQDN</th><th>Templates</th></tr></thead>
 <tbody>
 <tr><td><code>fw</code></td><td><code>fw-vsphere-01.strykercorp.com</code></td><td><code>fwa-vlan106</code></td><td><code>vcraeng.com</code></td><td>FW-Redhat-9, FW-Redhat-10, FW-GI-6.6, FW-GI-7.1, FW-GI-7.2, FW-GI-7.3</td></tr>
 <tr><td><code>blr</code></td><td><code>blr-vsphere-01.strykercorp.com</code></td><td><code>VLAN-126</code></td><td><code>vcraeng.com</code></td><td>BLR-Redhat-9, BLR-Redhat-10, BLR-GI-6.6, BLR-GI-7.1, BLR-GI-7.2, BLR-GI-7.3</td></tr>
-<tr><td><code>stc</code></td><td><code>stc-vsphere-01.strykercorp.com</code></td><td><code>VM Network</code></td><td>—</td><td>STC-Redhat-9, STC-Redhat-10, STC-GI-6.6, STC-GI-7.1, STC-GI-7.2, STC-GI-7.3</td></tr>
+<tr><td><code>stc</code></td><td><code>stc-vsphere-01.strykercorp.com</code></td><td><code>stc-vlan847</code></td><td>—</td><td>SC-Redhat 9 (quote names with spaces)</td></tr>
 </tbody>
 </table>
 
@@ -739,7 +751,9 @@ object in the inventory afterwards.</p>
 <pre><code>./target.sh e2e blr BLR-GI-6.6 --template-cycle</code></pre>
 
 <h4>STC — one template</h4>
-<pre><code>./target.sh e2e stc STC-GI-7.3 --template-cycle</code></pre>
+<pre><code>./target.sh e2e stc 'SC-Redhat 9' --template-cycle</code></pre>
+<p>STC template names use the <code>SC-</code> prefix and spaces (e.g. <code>SC-Redhat 9</code>).
+Always quote names that contain spaces.</p>
 
 <h4>Explicit form (same thing, all flags visible)</h4>
 <pre><code>./scripts/e2e_validate.sh \
@@ -748,6 +762,13 @@ object in the inventory afterwards.</p>
   --template-cycle \
   --portgroup <span class="str">'fwa-vlan106'</span> \
   --fqdn-domain vcraeng.com \
+  --insecure
+
+./scripts/e2e_validate.sh \
+  --vcenter stc-vsphere-01.strykercorp.com \
+  --template <span class="str">'SC-Redhat 9'</span> \
+  --template-cycle \
+  --portgroup <span class="str">'stc-vlan847'</span> \
   --insecure</code></pre>
 <p><code>--template-cycle</code> is shorthand for <code>--mode convert</code>,
 the destructive acknowledgement, and <code>--convert-to-template</code>.</p>
@@ -795,7 +816,7 @@ must never run at once, and the address must be free before you start.</div>
 <span class="cmt"># All six BLR templates</span>
 ./target.sh e2e-site blr --template-cycle
 
-<span class="cmt"># All six STC templates</span>
+<span class="cmt"># STC (currently SC-Redhat 9 only)</span>
 ./target.sh e2e-site stc --template-cycle
 
 <span class="cmt"># Watch a run in progress</span>

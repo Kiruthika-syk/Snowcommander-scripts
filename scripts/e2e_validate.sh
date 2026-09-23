@@ -36,6 +36,10 @@
 #       --template FW-Redhat-9 --template-cycle \
 #       --portgroup 'fwa-vlan106' --fqdn-domain vcraeng.com --insecure
 #
+#   scripts/e2e_validate.sh --vcenter stc-vsphere-01.strykercorp.com \
+#       --template 'SC-Redhat 9' --template-cycle \
+#       --portgroup 'stc-vlan847' --insecure
+#
 #   scripts/e2e_validate.sh ... --existing-host blr-gi-6   # skip stages 1-3
 #   scripts/e2e_validate.sh ... --keep-tools               # skip stage 7
 #   scripts/e2e_validate.sh ... --remote-dir /opt/foo      # script location
@@ -124,6 +128,7 @@ ENV_KEYS=(
   "AZCM_TAGS=Environment=Production"
   "AZCM_CORRELATION_ID="
   "AZCM_DISCONNECT_BEFORE_CONNECT=1"
+  "AZCM_RESOURCE_NAME="
   "RHSM_USERNAME="
   "RHSM_PASSWORD="
   "SYSLOG_SERVER1=10.132.118.100"

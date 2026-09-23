@@ -43,7 +43,7 @@ declare -A SITE_VCENTER=(
 declare -A SITE_PORTGROUP=(
   [blr]="${BLR_PORTGROUP:-VLAN-126}"
   [fw]="${FW_PORTGROUP:-fwa-vlan106}"
-  [stc]="${STC_PORTGROUP:-VM Network}"
+  [stc]="${STC_PORTGROUP:-stc-vlan847}"
 )
 
 declare -A SITE_FQDN=(
@@ -61,9 +61,12 @@ SITE_TEMPLATES_fw=(
   FW-Redhat-9 FW-Redhat-10
   FW-GI-6.6 FW-GI-7.1 FW-GI-7.2 FW-GI-7.3
 )
+# STC vCenter uses SC-* names with spaces (not STC-*). Inventory from
+# IT/SnowComander/Templates — only RHEL security-tool targets are listed here.
+# Other objects in that folder (Windows templates, demo-7.2) are excluded.
+# Confirm live inventory: ./target.sh list-vcenter stc
 SITE_TEMPLATES_stc=(
-  STC-Redhat-9 STC-Redhat-10
-  STC-GI-6.6 STC-GI-7.1 STC-GI-7.2 STC-GI-7.3
+  'SC-Redhat 9'
 )
 
 log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
@@ -103,6 +106,7 @@ Examples:
   set -a; source ~/.snowcommander-creds.env; set +a
   ./target.sh list
   ./target.sh e2e fw FW-Redhat-9 --template-cycle --insecure
+  ./target.sh e2e stc 'SC-Redhat 9' --template-cycle --insecure
   ./target.sh e2e-site blr --template-cycle --insecure
   ./target.sh write-inventory && ./target.sh plan
   ./target.sh container deploy
