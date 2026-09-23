@@ -171,13 +171,15 @@ stop_service() {
 
     local svc="$1"
 
-
-
-    if systemctl list-unit-files | grep -q "^${svc}"; then
+    local max_wait="${2:-45}"
 
 
 
-        systemctl stop "$svc" 2>/dev/null || true
+    if timeout 10 systemctl list-unit-files 2>/dev/null | grep -q "^${svc}"; then
+
+
+
+        timeout "$max_wait" systemctl stop "$svc" 2>/dev/null || true
 
         systemctl disable "$svc" 2>/dev/null || true
 
@@ -433,21 +435,7 @@ stop_arc_services() {
 
 
 
-    for svc in himdsd arcproxyd extd gcad azcmagent; do
-
-
-
-        stop_service "${svc}.service"
-
-        stop_service "$svc"
-
-
-
-    done
-
-
-
-    # Stop anything still running after unit disable (stale Disconnected agents).
+    # Kill processes first — systemctl stop on Arc units can hang indefinitely.
 
     for svc in himdsd arcproxyd extd gcad; do
 
@@ -461,7 +449,101 @@ stop_arc_services() {
 
 
 
+    for svc in himdsd arcproxyd extd gcad azcmagent; do
+
+
+
+        stop_service "${svc}.service" 30
+
+        stop_service "$svc" 30
+
+
+
+    done
+
+
+
     sleep 1
+
+
+
+}
+
+
+
+arc_disconnect_local() {
+
+
+
+    if ! command -v azcmagent >/dev/null 2>&1; then
+
+        return 1
+
+    fi
+
+
+
+    local out="" rc=0
+
+
+
+    out=$(timeout 90 azcmagent disconnect --force-local-only 2>&1) || rc=$?
+
+    printf '%s\n' "$out"
+
+
+
+    if echo "$out" | grep -qiE 'Disconnected machine from Azure|Resource is already deleted'; then
+
+        return 0
+
+    fi
+
+
+
+    if [[ "$rc" -eq 124 ]]; then
+
+        warn "azcmagent disconnect timed out after 90s"
+
+        return 0
+
+    fi
+
+
+
+    if [[ "$rc" -ne 0 ]]; then
+
+        out=$(timeout 60 azcmagent disconnect --force 2>&1) || true
+
+        printf '%s\n' "$out"
+
+        echo "$out" | grep -qiE 'Disconnected machine from Azure|Resource is already deleted' && return 0
+
+        timeout 30 azcmagent disconnect 2>/dev/null || true
+
+    fi
+
+
+
+    return 1
+
+}
+
+
+
+arc_kill_processes() {
+
+
+
+    local svc
+
+
+
+    for svc in himdsd arcproxyd extd gcad; do
+
+        pkill -x "$svc" 2>/dev/null || true
+
+    done
 
 
 
@@ -479,23 +561,39 @@ remove_sentinel() {
 
 
 
+    local arc_disconnected=0
+
     if command -v azcmagent >/dev/null 2>&1; then
-
-
 
         info "Disconnecting stale Arc registration"
 
-        azcmagent disconnect --force-local-only 2>/dev/null \
-            || azcmagent disconnect --force 2>/dev/null \
-            || azcmagent disconnect 2>/dev/null || true
+        if arc_disconnect_local; then
 
+            arc_disconnected=1
 
+            info "Arc disconnected — proceeding to package removal (skipping extended service stop)"
+
+        else
+
+            warn "Arc disconnect did not confirm success — forcing local cleanup"
+
+            arc_disconnected=1
+
+        fi
 
     fi
 
 
 
-    stop_arc_services
+    if (( arc_disconnected )); then
+
+        arc_kill_processes
+
+    else
+
+        stop_arc_services
+
+    fi
 
 
 
