@@ -425,7 +425,57 @@ remove_crowdstrike() {
 
 
 
+stop_arc_services() {
+
+
+
+    local svc
+
+
+
+    for svc in himdsd arcproxyd extd azcmagent; do
+
+
+
+        stop_service "${svc}.service"
+
+        stop_service "$svc"
+
+
+
+    done
+
+
+
+    # Stop anything still running after unit disable (stale Disconnected agents).
+
+    for svc in himdsd arcproxyd extd; do
+
+
+
+        pkill -x "$svc" 2>/dev/null || true
+
+
+
+    done
+
+
+
+    sleep 1
+
+
+
+}
+
+
+
 remove_sentinel() {
+
+
+
+    info "Stopping Azure Arc services"
+
+    stop_arc_services
 
 
 
@@ -433,7 +483,11 @@ remove_sentinel() {
 
 
 
-        azcmagent disconnect --force >/dev/null 2>&1 || true
+        info "Disconnecting stale Arc registration"
+
+        azcmagent disconnect --force-local-only 2>/dev/null \
+            || azcmagent disconnect --force 2>/dev/null \
+            || azcmagent disconnect 2>/dev/null || true
 
 
 
@@ -441,9 +495,15 @@ remove_sentinel() {
 
 
 
+    stop_arc_services
+
+
+
     remove_package azcmagent
 
 
+
+    # Paths left by install_linux_azcmagent.sh and disconnected registrations.
 
     remove_directory /opt/azcmagent
 
@@ -453,13 +513,90 @@ remove_sentinel() {
 
     remove_directory /var/lib/GuestConfig
 
+    remove_directory /var/lib/azcmagent
+
+    remove_file /usr/bin/azcmagent
+
+    remove_file /usr/local/bin/azcmagent
+
+
+
+    for f in /root/install_linux_azcmagent.sh \
+               /home/tpx-admin/install_linux_azcmagent.sh \
+               "${HOME}/install_linux_azcmagent.sh"; do
+
+
+
+        remove_file "$f"
+
+
+
+    done
+
+
+
+    # Drop any leftover unit files not owned by the rpm anymore.
+
+    for f in /etc/systemd/system/himdsd.service \
+               /etc/systemd/system/arcproxyd.service \
+               /etc/systemd/system/extd.service; do
+
+
+
+        remove_file "$f"
+
+
+
+    done
+
 
 
     reload_systemd
 
 
 
+    if command -v azcmagent >/dev/null 2>&1 \
+        || rpm -q azcmagent >/dev/null 2>&1; then
+
+
+
+        error "azcmagent binary or package still present"
+
+        return 1
+
+
+
+    fi
+
+
+
+    for dir in /opt/azcmagent /etc/opt/azcmagent /var/opt/azcmagent; do
+
+
+
+        if [[ -d "$dir" ]]; then
+
+
+
+            error "Arc directory still present: ${dir}"
+
+            return 1
+
+
+
+        fi
+
+
+
+    done
+
+
+
     success "Azure Arc cleanup complete"
+
+    return 0
+
+
 
 }
 
@@ -695,6 +832,12 @@ verify() {
 
     verify_service falcon-sensor.service
 
+    verify_service himdsd.service
+
+    verify_service arcproxyd.service
+
+    verify_service extd.service
+
 
 
     echo
@@ -711,7 +854,13 @@ verify() {
 
     verify_directory /var/lib/falcon-sensor
 
+    verify_directory /opt/azcmagent
+
+    verify_directory /etc/opt/azcmagent
+
     verify_directory /var/opt/azcmagent
+
+    verify_directory /var/lib/GuestConfig
 
 
 

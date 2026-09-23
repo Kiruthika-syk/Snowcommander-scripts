@@ -894,19 +894,21 @@ else
   echo
 
   echo "    --- post-uninstall systemctl ---"
-  for svc in falcon-sensor taniumclient; do
+  for svc in falcon-sensor taniumclient himdsd arcproxyd extd; do
     state="$(rsh "systemctl is-active ${svc} 2>/dev/null || echo not-found" 2>/dev/null || echo unknown)"
     printf '    %-22s %s\n' "$svc" "$state"
   done
 
   echo
   echo "    --- agent packages remaining ---"
-  remaining="$(rsh 'rpm -q falcon-sensor TaniumClient 2>&1 | grep -c "is not installed" || echo 0' 2>/dev/null || echo 0)"
-  rsh "rpm -q falcon-sensor TaniumClient 2>&1 || true" 2>/dev/null | sed 's/^/    /'
+  remaining="$(rsh 'rpm -q falcon-sensor TaniumClient azcmagent 2>&1 | grep -c "is not installed" || echo 0' 2>/dev/null || echo 0)"
+  rsh "rpm -q falcon-sensor TaniumClient azcmagent 2>&1 || true" 2>/dev/null | sed 's/^/    /'
 
   echo
-  echo "    --- azcmagent removed? ---"
-  rsh "command -v azcmagent >/dev/null 2>&1 && echo 'still present' || echo 'removed'" \
+  echo "    --- Azure Arc (azcmagent) removed? ---"
+  rsh "command -v azcmagent >/dev/null 2>&1 && echo 'BINARY still present' || echo 'binary removed'" \
+    2>/dev/null | sed 's/^/    /'
+  rsh "for d in /opt/azcmagent /etc/opt/azcmagent /var/opt/azcmagent; do test -d \"\$d\" && echo \"DIR present: \$d\"; done; test ! -d /opt/azcmagent && test ! -d /var/opt/azcmagent && echo 'Arc directories clean'" \
     2>/dev/null | sed 's/^/    /'
 
   # The point of a partial teardown is that these two SURVIVE. Prove it
@@ -929,9 +931,9 @@ else
   ((retained_sub)) || printf '    %sNOT REGISTERED - subscription was lost%s\n' "$C_YELLOW" "$C_RESET"
 
   echo
-  if [[ "$remaining" == "2" ]] && ((retained_cmdb)); then
+  if [[ "$remaining" == "3" ]] && ((retained_cmdb)); then
     stage_pass "agents removed; cmdbsync and subscription retained"
-  elif [[ "$remaining" != "2" ]]; then
+  elif [[ "$remaining" != "3" ]]; then
     STAGE_RESULT[7]=PARTIAL
     STAGE_DETAIL[7]="some agent packages still present"
     printf '%s[%s]   STAGE 7 PARTIAL%s - some agent packages still present\n' "$C_YELLOW" "$(ts)" "$C_RESET"

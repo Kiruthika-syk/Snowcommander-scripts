@@ -159,11 +159,13 @@
   <a href="#creds">Credentials</a>
   <a href="#rhsm">Subscriptions</a>
   <div class="grp">Run it</div>
-  <a href="#vm">From your VM</a>
+  <a href="#setup">One-time setup</a>
+  <a href="#paths">Jump host vs container</a>
+  <a href="#vcenter-ref">vCenter reference</a>
   <a href="#one-template">One template</a>
   <a href="#one-vsphere">One vSphere</a>
   <a href="#all-three">All three vSphere</a>
-  <a href="#fleet">Fleet deploy</a>
+  <a href="#fleet">Container fleet deploy</a>
   <a href="#pipeline">GitHub pipeline</a>
   <a href="#gitcli">Git CLI</a>
   <a href="#hosting">Host this site</a>
@@ -638,35 +640,111 @@ component. <code>--rhsm-mode auto</code> (the default) decides from the template
 </tbody>
 </table>
 
-<h2 id="vm">Execution — from your VM</h2>
-<p>The harness runs on the jump VM because it needs <code>pyvmomi</code> and <code>sshpass</code>.
-The container is the right tool for production fleet deploys over key auth.</p>
-<pre><code><span class="cmt"># 0. Prepare — once per shell</span>
-cd /home/tpx-admin/snowcommander_scripts
+<h2 id="setup">One-time setup</h2>
+<p>Do this once on the jump VM before validating templates or running fleet deploys.</p>
+<pre><code>cd /home/tpx-admin/snowcommander_scripts
+
+<span class="cmt"># 1. Credentials (never commit this file)</span>
+cp credentials.env.example ~/.snowcommander-creds.env
+<span class="cmt"># Edit: VCENTER_USER, VCENTER_PASSWORD, SSHPASS, FALCON_CID, …</span>
 set -a; source ~/.snowcommander-creds.env; set +a
 
-<span class="cmt"># 1. Prove credentials and scope. Read-only, changes nothing.</span>
-<span class="cmt">#    Prints each template's REAL guest OS.</span>
-python3 scripts/vsphere_provision.py \
-  --vcenter blr-vsphere-01.strykercorp.com \
-  --list-templates --insecure
+<span class="cmt"># 2. Stage vendor RPMs (~548 MB — not in git)</span>
+cp -r /opt/snowcommander-packages/crowdstrike ./crowdstrike
+cp -r /opt/snowcommander-packages/tanium      ./tanium
+cp /opt/snowcommander-packages/tanium/tanium-init.dat ./tanium/
 
-<span class="cmt"># 2. Dry run against a host you already have — no VM is created</span>
+<span class="cmt"># 3. Build the deployer container (needed for fleet deploy, not for e2e)</span>
+podman build -t sectools-deployer:latest .
+
+<span class="cmt"># 4. Confirm the catalogue</span>
+./target.sh list</code></pre>
+<p>Source credentials in every new shell: <code>set -a; source ~/.snowcommander-creds.env; set +a</code></p>
+
+<h2 id="paths">Jump host vs container — which path to use</h2>
+<p>These are two different workflows. Do not mix them up.</p>
+<table>
+<thead><tr><th>Goal</th><th>Command</th><th>Runs on</th></tr></thead>
+<tbody>
+<tr><td>Validate <b>one template</b> on vSphere</td><td><code>./target.sh e2e fw FW-GI-7.3 --template-cycle</code></td><td>Jump host</td></tr>
+<tr><td>Validate <b>all templates</b> on one vCenter</td><td><code>./target.sh e2e-site fw --template-cycle</code></td><td>Jump host</td></tr>
+<tr><td>Validate <b>all three vCenters</b></td><td><code>./target.sh e2e-all-sites --template-cycle</code></td><td>Jump host</td></tr>
+<tr><td>Deploy tools to <b>live servers</b></td><td><code>./target.sh container deploy</code></td><td>Container</td></tr>
+</tbody>
+</table>
+
+<div class="note"><b>Template validation does not use the container.</b> The e2e harness needs
+<code>pyvmomi</code> (vSphere API) and <code>sshpass</code> (password auth on fresh templates) on the
+jump VM. The <code>sectools-deployer</code> container is for production fleet deploys over SSH keys
+to hostnames in an inventory file — it never talks to vCenter.</div>
+
+<div class="flow-row">
+  <div class="flow-box"><b>Jump host</b><small>pyvmomi + sshpass</small></div>
+  <span class="flow-arrow">→</span>
+  <div class="flow-box"><b>vCenter</b><small>clone / convert template</small></div>
+  <span class="flow-arrow">→</span>
+  <div class="flow-box"><b>Target VM</b><small>install · verify · uninstall</small></div>
+</div>
+<div class="flow-row">
+  <div class="flow-box"><b>Container</b><small>SSH key auth</small></div>
+  <span class="flow-arrow">→</span>
+  <div class="flow-box"><b>Inventory</b><small>hostnames / IPs</small></div>
+  <span class="flow-arrow">→</span>
+  <div class="flow-box"><b>Live servers</b><small>plan · verify · deploy</small></div>
+</div>
+
+<h3>Smoke checks before a full run</h3>
+<pre><code><span class="cmt"># Prove vCenter credentials and list templates in scope (read-only)</span>
+./target.sh list-vcenter fw
+
+<span class="cmt"># Dry run against a host that already exists — no VM is created</span>
 ./scripts/e2e_validate.sh --existing-host blr-gi-6 --keep-tools</code></pre>
 
+<h2 id="vcenter-ref">vCenter reference</h2>
+<p><code>target.sh</code> knows three sites. Portgroups and FQDN defaults are baked in; override with
+<code>--portgroup</code> or environment variables (<code>BLR_PORTGROUP</code>, <code>FW_FQDN_DOMAIN</code>, …).</p>
+<table>
+<thead><tr><th>Site</th><th>vCenter</th><th>Default portgroup</th><th>FQDN</th><th>Templates (6 each)</th></tr></thead>
+<tbody>
+<tr><td><code>fw</code></td><td><code>fw-vsphere-01.strykercorp.com</code></td><td><code>fwa-vlan106</code></td><td><code>vcraeng.com</code></td><td>FW-Redhat-9, FW-Redhat-10, FW-GI-6.6, FW-GI-7.1, FW-GI-7.2, FW-GI-7.3</td></tr>
+<tr><td><code>blr</code></td><td><code>blr-vsphere-01.strykercorp.com</code></td><td><code>VLAN-126</code></td><td><code>vcraeng.com</code></td><td>BLR-Redhat-9, BLR-Redhat-10, BLR-GI-6.6, BLR-GI-7.1, BLR-GI-7.2, BLR-GI-7.3</td></tr>
+<tr><td><code>stc</code></td><td><code>stc-vsphere-01.strykercorp.com</code></td><td><code>VM Network</code></td><td>—</td><td>STC-Redhat-9, STC-Redhat-10, STC-GI-6.6, STC-GI-7.1, STC-GI-7.2, STC-GI-7.3</td></tr>
+</tbody>
+</table>
+
+<h3>Recommended order per vCenter</h3>
+<ol>
+<li><code>./target.sh list-vcenter fw</code> — confirm templates exist in vCenter</li>
+<li><code>./target.sh e2e fw FW-GI-6.6 --template-cycle</code> — one GI template end-to-end first</li>
+<li><code>./target.sh e2e-site fw --template-cycle</code> — all six templates on that vCenter</li>
+<li>Repeat steps 1–3 for <code>blr</code>, then <code>stc</code></li>
+<li>After VMs are provisioned from validated templates → <code>./target.sh container deploy</code></li>
+</ol>
+
 <h2 id="one-template">One template at a time</h2>
+<p>Runs on the <b>jump host</b>, not in a container. Always source credentials first:
+<code>set -a; source ~/.snowcommander-creds.env; set +a</code></p>
 
 <p>Two ways to validate a template. Pick based on whether you want a second
 object in the inventory afterwards.</p>
 
 <h3>Round trip on the template itself (recommended)</h3>
-<p>No new VM. The template becomes a VM, is validated, and is converted back.</p>
-<pre><code>cd /home/tpx-admin/snowcommander_scripts
-set -a; source ~/.snowcommander-creds.env; set +a
+<p>No new VM. The template becomes a VM, is validated, and is converted back.
+<code>target.sh</code> supplies the correct vCenter, portgroup and FQDN per site.</p>
 
-./scripts/e2e_validate.sh \
+<h4>FW — one template</h4>
+<pre><code>./target.sh e2e fw FW-GI-7.3 --template-cycle</code></pre>
+
+<h4>BLR — one template</h4>
+<pre><code>./target.sh e2e blr BLR-GI-6.6 --template-cycle</code></pre>
+
+<h4>STC — one template</h4>
+<pre><code>./target.sh e2e stc STC-GI-7.3 --template-cycle</code></pre>
+
+<h4>Explicit form (same thing, all flags visible)</h4>
+<pre><code>./scripts/e2e_validate.sh \
   --vcenter fw-vsphere-01.strykercorp.com \
-  --template FW-Redhat-9 \
+  --template FW-GI-7.3 \
   --template-cycle \
   --portgroup <span class="str">'fwa-vlan106'</span> \
   --fqdn-domain vcraeng.com \
@@ -707,74 +785,84 @@ with the template's own hostname and static IP. Two clones of the same template
 must never run at once, and the address must be free before you start.</div>
 
 <h2 id="one-vsphere">Every template in one vSphere</h2>
-<pre><code>cd /home/tpx-admin/snowcommander_scripts
-set -a; source ~/.snowcommander-creds.env; set +a
+<p>Runs sequentially on the jump host. Each template is round-tripped; logs go to
+<code>/tmp/e2e-&lt;site&gt;-&lt;template&gt;.log</code>.</p>
+<pre><code>set -a; source ~/.snowcommander-creds.env; set +a
 
-<span class="cmt"># All six FW templates (x86_64) — round-trip each golden image</span>
+<span class="cmt"># All six FW templates</span>
 ./target.sh e2e-site fw --template-cycle
 
 <span class="cmt"># All six BLR templates</span>
 ./target.sh e2e-site blr --template-cycle
 
-<span class="cmt"># Or discover live names from vCenter first</span>
-./target.sh list-vcenter fw
-python3 scripts/vsphere_provision.py \
-  --vcenter fw-vsphere-01.strykercorp.com --list-templates --insecure</code></pre>
+<span class="cmt"># All six STC templates</span>
+./target.sh e2e-site stc --template-cycle
+
+<span class="cmt"># Watch a run in progress</span>
+tail -f /tmp/e2e-fw-FW-GI-7.3.log</code></pre>
 
 <h2 id="all-three">All three vSphere at once</h2>
-<p>Each vCenter is processed in its own background job, with one log file per template.
-<code>wait</code> blocks until every site finishes, then a combined summary is printed.</p>
-<pre><code>cd /home/tpx-admin/snowcommander_scripts
-set -a; source ~/.snowcommander-creds.env; set +a
+<p>FW, BLR and STC run in parallel background jobs — one log file per template under
+<code>/tmp/e2e-runs/</code>. A combined summary is printed when all sites finish.</p>
+<pre><code>set -a; source ~/.snowcommander-creds.env; set +a
 
-mkdir -p /tmp/e2e-runs
+./target.sh e2e-all-sites --template-cycle
 
-run_site() {
-  <span class="kw">local</span> vc=<span class="str">"$1"</span> site=<span class="str">"$2"</span> pg=<span class="str">"$3"</span>; <span class="kw">shift</span> 3
-  <span class="kw">for</span> t <span class="kw">in</span> <span class="str">"$@"</span>; <span class="kw">do</span>
-    ./scripts/e2e_validate.sh \
-      --vcenter <span class="str">"$vc"</span> --template <span class="str">"$t"</span> \
-      --name <span class="str">"e2e-${site}-${t,,}"</span> \
-      --portgroup <span class="str">"$pg"</span> --insecure \
-      > <span class="str">"/tmp/e2e-runs/${site}-${t}.log"</span> 2>&1
-    <span class="kw">echo</span> <span class="str">"${site} ${t} exit=$?"</span> >> /tmp/e2e-runs/summary.txt
-  <span class="kw">done</span>
-}
+<span class="cmt"># Review results</span>
+column -t /tmp/e2e-runs/summary.txt
+tail /tmp/e2e-runs/fw-FW-GI-7.3.log</code></pre>
+<div class="note caution"><b>Run one template end to end first.</b> Parallel runs across three sites convert
+templates simultaneously. Confirm a single clean pass on each vCenter before scaling out.</div>
 
-: > /tmp/e2e-runs/summary.txt
+<h2 id="fleet">Container fleet deploy — existing servers</h2>
+<p>Use this <b>after</b> templates are validated and VMs are running in production.
+The container SSHs to hostnames in an inventory file — it does <b>not</b> talk to vCenter
+and does <b>not</b> accept template names.</p>
 
-run_site blr-vsphere-01.strykercorp.com blr <span class="str">'VM Network'</span> BLR-Redhat-9 BLR-Redhat-10 BLR-GI-6.6 &
-run_site fw-vsphere-01.strykercorp.com  fw  <span class="str">'VM Network'</span> BLR-Redhat-9 BLR-GI-7.1 &
-run_site stc-vsphere-01.strykercorp.com stc <span class="str">'VM Network'</span> BLR-Redhat-9 BLR-GI-7.2 &
+<h3>Prepare inventory</h3>
+<pre><code>./target.sh write-inventory ./inventory
+vi ./inventory   <span class="cmt"># one hostname or IP per line; comments with #</span></code></pre>
 
-wait
-<span class="kw">echo</span> <span class="str">"=== combined summary ==="</span>
-column -t /tmp/e2e-runs/summary.txt</code></pre>
-<div class="note caution"><b>Run one template end to end first.</b> Parallel runs across three sites create
-real VMs simultaneously. Confirm a single clean pass before scaling out.</div>
+<h3>Option 1 — <code>target.sh container</code> (simplest)</h3>
+<pre><code>set -a; source ~/.snowcommander-creds.env; set +a
 
-<h2 id="fleet">Fleet deploy — existing servers</h2>
-<p>For servers that already exist, skip vSphere entirely and use the container.</p>
-<pre><code><span class="cmt"># Build once</span>
-cd /home/tpx-admin/snowcommander_scripts
-podman build -t sectools-deployer:latest .
+./target.sh container plan
+./target.sh container verify
+./target.sh container deploy</code></pre>
 
-<span class="cmt"># Inventory: one hostname per line</span>
-cp inventory.example inventory && vi inventory
-
-<span class="cmt"># plan (read-only) → verify → deploy</span>
-podman run --rm \
+<h3>Option 2 — <code>podman run</code> directly</h3>
+<pre><code>podman run --rm \
   --env-file ~/.snowcommander-creds.env \
-  -v ./secrets/ssh_key:/run/secrets/ssh_key:ro \
-  -v ./secrets/known_hosts:/run/secrets/known_hosts:ro \
+  -v ~/.ssh/id_ed25519:/run/secrets/ssh_key:ro \
   -v ./inventory:/etc/snowcommander/inventory:ro \
   -e INVENTORY=/etc/snowcommander/inventory \
-  -e PARALLEL=10 -e RETRIES=2 \
-  sectools-deployer:latest plan</code></pre>
-<p>Swap the final argument for <code>verify</code> or <code>deploy all</code>. Or run the fan-out directly
-on the VM:</p>
-<pre><code>./scripts/deploy_targets.sh --inventory ./inventory --mode plan --parallel 10
-./scripts/deploy_targets.sh --hosts host1,host2 --mode deploy --components all --retries 2</code></pre>
+  -e PARALLEL=5 \
+  sectools-deployer:latest plan
+
+<span class="cmt"># then verify, then:</span>
+podman run --rm \
+  --env-file ~/.snowcommander-creds.env \
+  -v ~/.ssh/id_ed25519:/run/secrets/ssh_key:ro \
+  -v ./inventory:/etc/snowcommander/inventory:ro \
+  -e INVENTORY=/etc/snowcommander/inventory \
+  sectools-deployer:latest deploy all</code></pre>
+
+<h3>Option 3 — docker compose</h3>
+<pre><code>export INVENTORY_PATH=./inventory
+export SSH_KEY_PATH=~/.ssh/id_ed25519
+docker compose run --rm plan
+docker compose run --rm verify
+docker compose run --rm deploy</code></pre>
+
+<h3>Option 4 — jump host without container</h3>
+<p>Same logic as the container, runs directly on the VM (needs SSH key in environment):</p>
+<pre><code>./target.sh plan
+./target.sh verify
+./target.sh deploy</code></pre>
+
+<div class="note"><b>The container orchestrates; it never hosts an agent.</b> CrowdStrike, Tanium and
+Azure Arc must run on the target OS. The container only opens outbound SSH, pushes the
+bundle, and runs <code>security.sh</code> remotely.</div>
 
 <h2 id="pipeline">GitHub pipeline</h2>
 <p>Two workflows in <code>.github/workflows/</code>.</p>
