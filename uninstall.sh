@@ -433,7 +433,7 @@ stop_arc_services() {
 
 
 
-    for svc in himdsd arcproxyd extd azcmagent; do
+    for svc in himdsd arcproxyd extd gcad azcmagent; do
 
 
 
@@ -449,7 +449,7 @@ stop_arc_services() {
 
     # Stop anything still running after unit disable (stale Disconnected agents).
 
-    for svc in himdsd arcproxyd extd; do
+    for svc in himdsd arcproxyd extd gcad; do
 
 
 
@@ -519,6 +519,10 @@ remove_sentinel() {
 
     remove_file /usr/local/bin/azcmagent
 
+    remove_file /usr/sbin/gcad
+
+    remove_file /etc/cron.d/azcmagent_autoupgrade
+
 
 
     for f in /root/install_linux_azcmagent.sh \
@@ -539,7 +543,8 @@ remove_sentinel() {
 
     for f in /etc/systemd/system/himdsd.service \
                /etc/systemd/system/arcproxyd.service \
-               /etc/systemd/system/extd.service; do
+               /etc/systemd/system/extd.service \
+               /etc/systemd/system/gcad.service; do
 
 
 

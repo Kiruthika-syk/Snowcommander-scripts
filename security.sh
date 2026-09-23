@@ -676,13 +676,33 @@ install_sentinel() {
     require_value "$name" || { set_result sentinel FAILED "${name} not set"; return 1; }
   done
 
+  if [[ "$AZCM_SP_SECRET" == *REPLACE* ]] \
+    || [[ "$AZCM_SP_SECRET" == *CHANGEME* ]] \
+    || [[ ${#AZCM_SP_SECRET} -lt 8 ]]; then
+    err "  AZCM_SP_SECRET appears invalid or placeholder"
+    set_result sentinel FAILED "invalid AZCM_SP_SECRET"
+    return 1
+  fi
+
+  if [[ -z "${AZCM_RESOURCE_NAME:-}" ]]; then
+    local hint mac
+    hint="$(hostname -s 2>/dev/null || hostname)"
+    mac="$(cat /sys/class/net/*/address 2>/dev/null | grep -v '^00:00:00:00:00:00$' | head -1 | tr -d ':' || true)"
+    if [[ -n "$mac" && ${#mac} -ge 6 ]]; then
+      export AZCM_RESOURCE_NAME="${hint}-${mac: -6}"
+    else
+      export AZCM_RESOURCE_NAME="${hint}-$(cat /proc/sys/kernel/random/uuid | cut -d- -f1)"
+    fi
+    log "  AZCM_RESOURCE_NAME not set; using ${AZCM_RESOURCE_NAME}"
+  fi
+
   # sentinel_core.sh disconnects before connecting, which is destructive for an
   # already-onboarded host. Skip entirely when the machine is connected to the
   # intended subscription and resource group.
   if command -v azcmagent >/dev/null 2>&1 && [[ "${SENTINEL_FORCE_RECONNECT:-0}" != "1" ]]; then
     local show
     show="$(azcmagent show 2>/dev/null || true)"
-    if printf '%s' "$show" | grep -qi 'Agent Status.*: *Connected' \
+    if printf '%s' "$show" | grep -qiE 'Agent Status[^:]*:[[:space:]]*Connected' \
       && printf '%s' "$show" | grep -qF "$AZCM_SUBSCRIPTION_ID" \
       && printf '%s' "$show" | grep -qF "$AZCM_RESOURCE_GROUP"; then
       log "  azcmagent already Connected to ${AZCM_RESOURCE_GROUP}; skipping re-onboarding"
@@ -690,9 +710,12 @@ install_sentinel() {
       set_result sentinel UNCHANGED "already connected to ${AZCM_RESOURCE_GROUP}"
       return 0
     fi
+    if printf '%s' "$show" | grep -qiE 'Agent Status[^:]*:[[:space:]]*Disconnected'; then
+      log "  azcmagent is Disconnected; running reconnect (force-local disconnect + connect)"
+    fi
   fi
 
-  log "  onboarding host to Azure Arc in ${AZCM_RESOURCE_GROUP} (${AZCM_LOCATION})"
+  log "  onboarding host to Azure Arc in ${AZCM_RESOURCE_GROUP} (${AZCM_LOCATION}) as ${AZCM_RESOURCE_NAME}"
 
   # Secrets are passed through the environment, never on the command line, so
   # they cannot leak via the process table.
@@ -706,6 +729,7 @@ install_sentinel() {
   CORRELATION_ID="${AZCM_CORRELATION_ID:-$(cat /proc/sys/kernel/random/uuid)}" \
   AZCM_TAGS="${AZCM_TAGS:-Environment=Production}" \
   AZCM_DISCONNECT_BEFORE_CONNECT="${AZCM_DISCONNECT_BEFORE_CONNECT:-1}" \
+  AZCM_RESOURCE_NAME="${AZCM_RESOURCE_NAME}" \
   PORTAL_SUDO_PASSWORD="${PORTAL_SUDO_PASSWORD:-${SSHPASS:-}}" \
     bash "$script" || {
     set_result sentinel FAILED "sentinel_core.sh returned non-zero"

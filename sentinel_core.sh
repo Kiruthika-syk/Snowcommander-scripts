@@ -79,6 +79,61 @@ arc_telemetry() {
   fi
 }
 
+arc_agent_show() {
+  azcmagent show 2>/dev/null || true
+}
+
+arc_is_connected() {
+  arc_agent_show | grep -qiE 'Agent Status[^:]*:[[:space:]]*Connected'
+}
+
+arc_is_disconnected() {
+  arc_agent_show | grep -qiE 'Agent Status[^:]*:[[:space:]]*Disconnected'
+}
+
+azcmagent_installed() {
+  command -v azcmagent >/dev/null 2>&1 && rpm -q azcmagent >/dev/null 2>&1
+}
+
+default_azcm_resource_name() {
+  local hint mac
+  hint="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo arc)"
+  mac="$(cat /sys/class/net/*/address 2>/dev/null | grep -v '^00:00:00:00:00:00$' | head -1 | tr -d ':' || true)"
+  if [ -n "$mac" ] && [ "${#mac}" -ge 6 ]; then
+    printf '%s-%s' "$hint" "${mac: -6}"
+  else
+    printf '%s-%s' "$hint" "$(cat /proc/sys/kernel/random/uuid 2>/dev/null | cut -d- -f1 || date +%s)"
+  fi
+}
+
+arc_disconnect_stale() {
+  if ! command -v azcmagent >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "AZCM: clearing stale local registration..."
+  portal_sudo azcmagent disconnect --force-local-only 2>&1 \
+    || portal_sudo azcmagent disconnect --force 2>&1 \
+    || portal_sudo azcmagent disconnect 2>&1 || true
+  sleep 2
+}
+
+arc_connect_error_hint() {
+  local out="$1"
+  if echo "$out" | grep -qiE 'AZCM0041|invalid_client|AADSTS7000222|expired.*secret|401.*Unauthorized'; then
+    echo "ERROR: Azure service principal secret is invalid or expired (AZCM0041 / invalid_client)."
+    echo "HINT: Rotate the client secret in Azure Portal -> App registrations -> ${AZURE_CLIENT_ID}"
+    echo "      Update AZCM_SP_SECRET in securitytools.env or ~/.snowcommander-creds.env, then re-run."
+    return 0
+  fi
+  if echo "$out" | grep -qiE 'AZCM0044|already exists'; then
+    echo "ERROR: Arc machine resource name already exists in Azure."
+    echo "HINT: Delete stale Arc machine in portal, or set AZCM_RESOURCE_NAME to a unique value."
+    echo "      Suggested name: $(default_azcm_resource_name)"
+    return 0
+  fi
+  return 1
+}
+
 # Accept portal names (AZURE_*) or jump-host .env names (AZCM_*)
 AZURE_CLIENT_ID="${AZURE_CLIENT_ID:-${AZCM_SP_CLIENT_ID:-}}"
 AZURE_CLIENT_SECRET="${AZURE_CLIENT_SECRET:-${AZCM_SP_SECRET:-}}"
@@ -96,6 +151,11 @@ for v in AZURE_CLIENT_ID AZURE_CLIENT_SECRET AZURE_TENANT_ID AZURE_SUBSCRIPTION_
     exit 1
   fi
 done
+
+if echo "$AZURE_CLIENT_SECRET" | grep -qiE 'REPLACE|CHANGEME|YOUR_.*SECRET|<.*>'; then
+  echo "ERROR: AZCM_SP_SECRET appears to be a placeholder; set a valid service principal secret."
+  exit 1
+fi
 
 # 1. Inline wget provision
 if ! command -v wget &>/dev/null; then
@@ -118,35 +178,52 @@ INSTALLER="${HOME}/install_linux_azcmagent.sh"
 
 oracle_linux_azcm_repo_prep
 
-# 2. Download official installer
-echo "Downloading https://aka.ms/azcmagent → $INSTALLER"
-if ! output=$(wget https://aka.ms/azcmagent -O "$INSTALLER" 2>&1); then
-  echo "Download failed. Routing telemetry to gbl.his.arc.azure.com..."
+# 2. Install azcmagent package (skip download when already present)
+if azcmagent_installed && [ "${SENTINEL_FORCE_REINSTALL:-0}" != "1" ]; then
+  echo "azcmagent package already installed; skipping installer download"
+else
+  echo "Downloading https://aka.ms/azcmagent → $INSTALLER"
+  if ! output=$(wget https://aka.ms/azcmagent -O "$INSTALLER" 2>&1); then
+    echo "Download failed. Routing telemetry to gbl.his.arc.azure.com..."
+    echo "$output"
+    arc_telemetry "DownloadScriptFailed" "$output"
+    exit 1
+  fi
   echo "$output"
-  arc_telemetry "DownloadScriptFailed" "$output"
-  exit 1
-fi
-echo "$output"
-chmod 755 "$INSTALLER"
+  chmod 755 "$INSTALLER"
 
-# 3. Run installer package
-if ! portal_sudo bash "$INSTALLER"; then
-  echo "Installation execution failed. Routing telemetry to gbl.his.arc.azure.com..."
-  arc_telemetry "InstallScriptFailed" "bash install_linux_azcmagent.sh failed"
-  exit 1
+  if ! portal_sudo bash "$INSTALLER"; then
+    echo "Installation execution failed. Routing telemetry to gbl.his.arc.azure.com..."
+    arc_telemetry "InstallScriptFailed" "bash install_linux_azcmagent.sh failed"
+    exit 1
+  fi
 fi
 
-# 4. Connect — disconnect stale registration first, then connect
+command -v azcmagent >/dev/null 2>&1 || {
+  echo "ERROR: azcmagent is not available after install attempt."
+  exit 1
+}
+
+# 3. Connect — force-clear stale Disconnected registration, then connect
 AZCM_DISCONNECT_BEFORE_CONNECT="${AZCM_DISCONNECT_BEFORE_CONNECT:-1}"
-AZCM_RESOURCE_NAME="${AZCM_RESOURCE_NAME:-}"
-
+need_disconnect=0
 if [ "$AZCM_DISCONNECT_BEFORE_CONNECT" = "1" ] || [ "$AZCM_DISCONNECT_BEFORE_CONNECT" = "true" ]; then
-  echo "AZCM: azcmagent disconnect (clear stale registration before connect)..."
-  portal_sudo azcmagent disconnect 2>&1 || true
-  sleep 3
+  need_disconnect=1
+fi
+if arc_is_disconnected; then
+  echo "AZCM: agent is Disconnected; forcing local disconnect before reconnect"
+  need_disconnect=1
+fi
+if [ "$need_disconnect" -eq 1 ]; then
+  arc_disconnect_stale
 fi
 
-echo "Executing azcmagent connect to ${AZURE_LOCATION}..."
+if [ -z "${AZCM_RESOURCE_NAME:-}" ]; then
+  AZCM_RESOURCE_NAME="$(default_azcm_resource_name)"
+  echo "AZCM: using resource name ${AZCM_RESOURCE_NAME} (set AZCM_RESOURCE_NAME to override)"
+fi
+
+echo "Executing azcmagent connect to ${AZURE_LOCATION} as ${AZCM_RESOURCE_NAME}..."
 connect_args=(
   --service-principal-id "$AZURE_CLIENT_ID"
   --service-principal-secret "$AZURE_CLIENT_SECRET"
@@ -157,10 +234,8 @@ connect_args=(
   --cloud "$AZURE_CLOUD"
   --correlation-id "$CORRELATION_ID"
   --tags "$AZCM_TAGS"
+  --resource-name "$AZCM_RESOURCE_NAME"
 )
-if [ -n "$AZCM_RESOURCE_NAME" ]; then
-  connect_args+=(--resource-name "$AZCM_RESOURCE_NAME")
-fi
 
 set +e
 connect_out=$(portal_sudo azcmagent connect "${connect_args[@]}" 2>&1)
@@ -168,18 +243,18 @@ connect_status=$?
 set -e
 echo "$connect_out"
 
-if echo "$connect_out" | grep -qiE 'level=fatal|AZCM0044|already exists'; then
-  echo "ERROR: azcmagent connect failed (fatal in output)."
-  if echo "$connect_out" | grep -qi 'already exists'; then
-    echo "HINT: Arc machine name already in Azure. Delete stale Arc resource in portal, or set AZCM_RESOURCE_NAME in .env to a new name."
-  fi
-  arc_telemetry "ConnectFailed" "$(echo "$connect_out" | tail -3 | tr '\n' ' ')"
+if [ "$connect_status" -ne 0 ] \
+  || echo "$connect_out" | grep -qiE 'level=fatal|AZCM004[0-9]|invalid_client|already exists|401.*Unauthorized'; then
+  arc_connect_error_hint "$connect_out" || echo "ERROR: azcmagent connect failed."
+  arc_telemetry "ConnectFailed" "$(echo "$connect_out" | tail -5 | tr '\n' ' ')"
   exit 1
 fi
-if [ "$connect_status" -ne 0 ]; then
-  echo "Connection failed with exit code $connect_status. Forwarding logs to gbl.his.arc.azure.com..."
-  arc_telemetry "ConnectFailed" "azcmagent connect exit $connect_status"
-  exit "$connect_status"
+
+if ! arc_is_connected; then
+  echo "ERROR: azcmagent connect finished but agent is not Connected."
+  azcmagent show 2>&1 | head -n 20 || true
+  arc_telemetry "ConnectFailed" "agent not connected after connect"
+  exit 1
 fi
 
 echo "Sentinel execution sequence completed successfully."

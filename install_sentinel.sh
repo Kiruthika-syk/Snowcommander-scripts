@@ -92,11 +92,38 @@ detect_platform() {
 install_sentinel() {
   local script="${BASE_DIR}/sentinel_core.sh"
   [[ -x "$script" ]] || fail "Sentinel installer missing: $script"
-  local name
+  local name hint mac show
   for name in AZCM_SP_CLIENT_ID AZCM_SP_SECRET AZCM_SUBSCRIPTION_ID \
     AZCM_RESOURCE_GROUP AZCM_TENANT_ID AZCM_LOCATION; do
     require_value "$name"
   done
+  if [[ "$AZCM_SP_SECRET" == *REPLACE* ]] \
+    || [[ "$AZCM_SP_SECRET" == *CHANGEME* ]] \
+    || [[ ${#AZCM_SP_SECRET} -lt 8 ]]; then
+    fail "AZCM_SP_SECRET appears invalid or placeholder"
+  fi
+  if [[ -z "${AZCM_RESOURCE_NAME:-}" ]]; then
+    hint="$(hostname -s 2>/dev/null || hostname)"
+    mac="$(cat /sys/class/net/*/address 2>/dev/null | grep -v '^00:00:00:00:00:00$' | head -1 | tr -d ':' || true)"
+    if [[ -n "$mac" && ${#mac} -ge 6 ]]; then
+      export AZCM_RESOURCE_NAME="${hint}-${mac: -6}"
+    else
+      export AZCM_RESOURCE_NAME="${hint}-$(cat /proc/sys/kernel/random/uuid | cut -d- -f1)"
+    fi
+    log "AZCM_RESOURCE_NAME not set; using ${AZCM_RESOURCE_NAME}"
+  fi
+  if command -v azcmagent >/dev/null 2>&1 && [[ "${SENTINEL_FORCE_RECONNECT:-0}" != "1" ]]; then
+    show="$(azcmagent show 2>/dev/null || true)"
+    if printf '%s' "$show" | grep -qiE 'Agent Status[^:]*:[[:space:]]*Connected' \
+      && printf '%s' "$show" | grep -qF "$AZCM_SUBSCRIPTION_ID" \
+      && printf '%s' "$show" | grep -qF "$AZCM_RESOURCE_GROUP"; then
+      log "azcmagent already Connected to ${AZCM_RESOURCE_GROUP}; skipping re-onboarding"
+      return 0
+    fi
+    if printf '%s' "$show" | grep -qiE 'Agent Status[^:]*:[[:space:]]*Disconnected'; then
+      log "azcmagent is Disconnected; running reconnect"
+    fi
+  fi
   AZURE_CLIENT_ID="$AZCM_SP_CLIENT_ID" \
   AZURE_CLIENT_SECRET="$AZCM_SP_SECRET" \
   AZURE_TENANT_ID="$AZCM_TENANT_ID" \
@@ -107,9 +134,12 @@ install_sentinel() {
   CORRELATION_ID="${AZCM_CORRELATION_ID:-$(cat /proc/sys/kernel/random/uuid)}" \
   AZCM_TAGS="${AZCM_TAGS:-Environment=Production}" \
   AZCM_DISCONNECT_BEFORE_CONNECT="${AZCM_DISCONNECT_BEFORE_CONNECT:-1}" \
+  AZCM_RESOURCE_NAME="${AZCM_RESOURCE_NAME}" \
   PORTAL_SUDO_PASSWORD="${PORTAL_SUDO_PASSWORD:-${SSHPASS:-}}" \
   bash "$script"
   command -v azcmagent >/dev/null || fail "azcmagent not installed"
+  azcmagent show 2>/dev/null | grep -qiE 'Agent Status[^:]*:[[:space:]]*Connected' \
+    || fail "azcmagent installed but not Connected"
   azcmagent show 2>&1 | head -n 40 || true
 }
 
