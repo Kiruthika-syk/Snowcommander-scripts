@@ -551,6 +551,125 @@ arc_kill_processes() {
 
 
 
+arc_rpm_installed() {
+
+
+
+    rpm -q azcmagent >/dev/null 2>&1
+
+
+
+}
+
+
+
+arc_purge_binaries() {
+
+
+
+    local f
+
+
+
+    for f in /usr/bin/azcmagent /usr/local/bin/azcmagent /usr/sbin/azcmagent \
+             /opt/azcmagent/bin/azcmagent; do
+
+        remove_file "$f"
+
+    done
+
+
+
+    hash -r 2>/dev/null || true
+
+
+
+}
+
+
+
+arc_purge_package() {
+
+
+
+    remove_package azcmagent
+
+
+
+    if arc_rpm_installed; then
+
+        warn "azcmagent rpm still registered — forcing removal"
+
+        rpm -e --nodeps azcmagent >/dev/null 2>&1 || true
+
+    fi
+
+
+
+    hash -r 2>/dev/null || true
+
+
+
+}
+
+
+
+arc_verify_clean() {
+
+
+
+    local dir bin
+
+
+
+    hash -r 2>/dev/null || true
+
+
+
+    bin="$(type -p azcmagent 2>/dev/null || true)"
+
+    if [[ -n "$bin" && -x "$bin" ]]; then
+
+        error "azcmagent binary still present: ${bin}"
+
+        return 1
+
+    fi
+
+
+
+    if arc_rpm_installed; then
+
+        error "azcmagent package still registered in rpm"
+
+        return 1
+
+    fi
+
+
+
+    for dir in /opt/azcmagent /etc/opt/azcmagent /var/opt/azcmagent; do
+
+        if [[ -d "$dir" ]]; then
+
+            error "Arc directory still present: ${dir}"
+
+            return 1
+
+        fi
+
+    done
+
+
+
+    return 0
+
+
+
+}
+
+
+
 remove_sentinel() {
 
 
@@ -581,6 +700,12 @@ remove_sentinel() {
 
         fi
 
+    elif arc_rpm_installed || [[ -d /opt/azcmagent ]]; then
+
+        info "azcmagent not in PATH — skipping disconnect, forcing local cleanup"
+
+        arc_disconnected=1
+
     fi
 
 
@@ -597,7 +722,9 @@ remove_sentinel() {
 
 
 
-    remove_package azcmagent
+    arc_purge_package
+
+    arc_purge_binaries
 
 
 
@@ -612,10 +739,6 @@ remove_sentinel() {
     remove_directory /var/lib/GuestConfig
 
     remove_directory /var/lib/azcmagent
-
-    remove_file /usr/bin/azcmagent
-
-    remove_file /usr/local/bin/azcmagent
 
     remove_file /usr/sbin/gcad
 
@@ -658,46 +781,45 @@ remove_sentinel() {
 
 
 
-    if command -v azcmagent >/dev/null 2>&1 \
-        || rpm -q azcmagent >/dev/null 2>&1; then
+    if arc_verify_clean; then
 
+        success "Azure Arc cleanup complete"
 
-
-        error "azcmagent binary or package still present"
-
-        return 1
-
-
+        return 0
 
     fi
 
 
 
-    for dir in /opt/azcmagent /etc/opt/azcmagent /var/opt/azcmagent; do
+    warn "Arc cleanup incomplete — retrying forced purge"
+
+    arc_kill_processes
+
+    arc_purge_package
+
+    arc_purge_binaries
+
+    remove_directory /opt/azcmagent
+
+    remove_directory /etc/opt/azcmagent
+
+    remove_directory /var/opt/azcmagent
+
+    reload_systemd
 
 
 
-        if [[ -d "$dir" ]]; then
+    if arc_verify_clean; then
+
+        success "Azure Arc cleanup complete (after forced purge)"
+
+        return 0
+
+    fi
 
 
 
-            error "Arc directory still present: ${dir}"
-
-            return 1
-
-
-
-        fi
-
-
-
-    done
-
-
-
-    success "Azure Arc cleanup complete"
-
-    return 0
+    return 1
 
 
 
