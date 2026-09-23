@@ -27,6 +27,8 @@ IFS=$'\n\t'
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CREDS_FILE="${CREDS_FILE:-${HOME}/.snowcommander-creds.env}"
+CREDS_VAULT="${CREDS_VAULT:-${CREDS_FILE}.vault}"
+VAULT_PASS="${SNOWCOMMANDER_VAULT_PASS_FILE:-${HOME}/.snowcommander-vault.pass}"
 INVENTORY="${INVENTORY:-${BASE_DIR}/inventory}"
 IMAGE="${SECTOOLS_IMAGE:-sectools-deployer:latest}"
 
@@ -113,9 +115,30 @@ EOF
 }
 
 load_creds() {
-  [[ -r "$CREDS_FILE" ]] || die "credentials not found: ${CREDS_FILE} (cp credentials.env.example ${CREDS_FILE})"
+  local tmp="" src=""
+
+  if [[ -r "$CREDS_FILE" ]] \
+    && ! grep -q '^\$ANSIBLE_VAULT;' "$CREDS_FILE" 2>/dev/null; then
+    src="$CREDS_FILE"
+  elif [[ -r "$CREDS_VAULT" ]]; then
+    command -v ansible-vault >/dev/null 2>&1 \
+      || die "ansible-vault required to read ${CREDS_VAULT}"
+    [[ -r "$VAULT_PASS" ]] \
+      || die "vault password file missing: ${VAULT_PASS} (run: ./scripts/creds-vault.sh init)"
+    tmp="$(mktemp)"
+    chmod 600 "$tmp"
+    if ! ansible-vault view "$CREDS_VAULT" --vault-password-file "$VAULT_PASS" >"$tmp" 2>/dev/null; then
+      rm -f "$tmp"
+      die "failed to decrypt ${CREDS_VAULT} (wrong vault password?)"
+    fi
+    src="$tmp"
+  else
+    die "credentials not found: ${CREDS_FILE} or ${CREDS_VAULT} (see credentials.env.example)"
+  fi
+
   # shellcheck disable=SC1090
-  set -a; source "$CREDS_FILE"; set +a
+  set -a; source "$src"; set +a
+  [[ -n "$tmp" ]] && rm -f "$tmp"
 }
 
 resolve_site() {
@@ -354,8 +377,15 @@ container_run() {
   fi
 
   load_creds
+  local env_file="$CREDS_FILE" env_tmp=""
+  if [[ ! -r "$CREDS_FILE" && -r "$CREDS_VAULT" ]]; then
+    env_tmp="$(mktemp)"
+    chmod 600 "$env_tmp"
+    ansible-vault view "$CREDS_VAULT" --vault-password-file "$VAULT_PASS" >"$env_tmp"
+    env_file="$env_tmp"
+  fi
   exec "$RUNNER" run --rm \
-    --env-file "$CREDS_FILE" \
+    --env-file "$env_file" \
     -v "${SSH_KEY_FILE:-${HOME}/.ssh/id_ed25519}:/run/secrets/ssh_key:ro" \
     -v "${INVENTORY}:/etc/snowcommander/inventory:ro" \
     -e INVENTORY=/etc/snowcommander/inventory \
