@@ -157,9 +157,11 @@
   <a href="#packages">Package selection</a>
   <a href="#templates">vSphere templates</a>
   <a href="#creds">Credentials</a>
+  <a href="#creds-encrypt">Encrypt credentials</a>
   <a href="#rhsm">Subscriptions</a>
   <div class="grp">Run it</div>
   <a href="#setup">One-time setup</a>
+  <a href="#methodology">Execution methodology</a>
   <a href="#paths">Jump host vs container</a>
   <a href="#vcenter-ref">vCenter reference</a>
   <a href="#one-template">One template</a>
@@ -452,17 +454,18 @@ may report an older guest OS string; trust <code>/etc/os-release</code> and the 
 <li><b>CrowdStrike</b> — skips entirely when build, CID and service state all match. CID compared as bare 32 hex characters, since <code>falconctl</code> reports it lowercase and without the checksum suffix.</li>
 <li><b>Tanium</b> — restarts only if the RPM or <code>tanium-init.dat</code> actually changed.</li>
 <li><b>cmdbsync</b> — never resets an existing account's password unless <code>CMDBSYNC_FORCE_PASSWORD=1</code>.</li>
-<li><b>Sentinel</b> — skipped when already Connected to the intended subscription, because <code>sentinel_core.sh</code> disconnects before reconnecting.</li>
+<li><b>Sentinel</b> — skipped when already Connected; Disconnected agents are force-disconnected locally then reconnected. Expired <code>AZCM_SP_SECRET</code> fails with an actionable error.</li>
 <li><b>syslog</b> — writes only on content change, validates with <code>rsyslogd -N1</code>, rolls back on failure.</li>
 </ul>
 
 <h3>Secret handling</h3>
 <p>Secrets are never baked into an image, written to a tarball, or passed as command arguments where
-<code>ps</code> could read them. They travel on a dedicated SSH channel into a 0600 file and are shredded
-afterwards. A <code>sed</code> filter in the output pipeline masks secret <i>values</i> everywhere they
-appear — including in output from <code>dnf</code>, <code>falconctl</code> and <code>azcmagent</code>,
-which these scripts do not control. Installation status is never hidden. The CID is deliberately not
-redacted: it is an identifier, not a credential.</p>
+<code>ps</code> could read them. On the jump host they live in
+<code>~/.snowcommander-creds.env.vault</code> (ansible-vault encrypted); <code>target.sh</code> decrypts
+to a temp file in memory for the current process only. On targets they travel on a dedicated SSH
+channel into a 0600 <code>securitytools.env</code> and can be shredded after install. A <code>sed</code>
+filter masks secret <i>values</i> in logs — including output from <code>dnf</code>, <code>falconctl</code>
+and <code>azcmagent</code>. The CID is deliberately not redacted: it is an identifier, not a credential.</p>
 
 <h2 id="scripts">Scripts — what each one does</h2>
 <h3>Core</h3>
@@ -471,9 +474,9 @@ redacted: it is an identifier, not a credential.</p>
 <tbody>
 <tr><td><code>security.sh</code></td><td>1071</td><td>target</td><td>Main orchestrator. Modes: <code>all</code>, individual components, <code>verify</code>, <code>plan</code>.</td></tr>
 <tr><td><code>lib/pkg_select.sh</code></td><td>459</td><td>both</td><td>OS→elN detection, package selection, five-point validation incl. digests.</td></tr>
-<tr><td><code>uninstall.sh</code></td><td>990</td><td>target</td><td>Removes packages, services, directories, users and sudoers.</td></tr>
+<tr><td><code>uninstall.sh</code></td><td>1240</td><td>target</td><td>Removes packages, services, directories, users and sudoers. Arc uninstall is time-boxed and skips hung <code>systemctl stop</code> after disconnect.</td></tr>
 <tr><td><code>sub-reg.sh</code></td><td>185</td><td>target</td><td>RHSM <code>register</code> / <code>unregister</code> / <code>status</code>, repos per EL version.</td></tr>
-<tr><td><code>sentinel_core.sh</code></td><td>186</td><td>target</td><td>Azure Arc onboarding via service principal.</td></tr>
+<tr><td><code>sentinel_core.sh</code></td><td>260</td><td>target</td><td>Azure Arc onboarding via service principal; force-local disconnect, unique resource names, credential validation.</td></tr>
 </tbody>
 </table>
 
@@ -481,11 +484,12 @@ redacted: it is an identifier, not a credential.</p>
 <table>
 <thead><tr><th>Script</th><th>Lines</th><th>Purpose</th></tr></thead>
 <tbody>
-<tr><td><code>scripts/e2e_validate.sh</code></td><td>515</td><td>The 8-stage harness. Per-stage logging and a final matrix.</td></tr>
-<tr><td><code>scripts/vsphere_provision.py</code></td><td>398</td><td>vSphere stages. Scope-locked to <code>SnowCommander/Templates</code>.</td></tr>
+<tr><td><code>scripts/e2e_validate.sh</code></td><td>1070</td><td>The 8-stage harness. Per-stage logging, guest SSH remedy, final matrix.</td></tr>
+<tr><td><code>scripts/vsphere_provision.py</code></td><td>870</td><td>vSphere stages. Scope-locked to <code>SnowCommander/Templates</code>; lists VMs mid template-cycle.</td></tr>
+<tr><td><code>scripts/creds-vault.sh</code></td><td>130</td><td>Encrypt/decrypt <code>~/.snowcommander-creds.env</code> with ansible-vault.</td></tr>
 <tr><td><code>scripts/deploy_targets.sh</code></td><td>308</td><td>SSH fan-out with bounded concurrency and retries.</td></tr>
 <tr><td><code>scripts/stage_bundle.sh</code></td><td>189</td><td>Builds the per-target bundle from the manifest.</td></tr>
-<tr><td><code>target.sh</code></td><td>400</td><td>Single entry point: FW/BLR/STC template catalogue, <code>e2e-site</code>, fleet deploy.</td></tr>
+<tr><td><code>target.sh</code></td><td>430</td><td>Single entry point: FW/BLR/STC catalogue, <code>e2e-stc</code>, <code>e2e-site</code>, fleet deploy; auto-decrypts vault creds.</td></tr>
 <tr><td><code>entrypoint.sh</code></td><td>155</td><td>Container entry: <code>plan</code>, <code>verify</code>, <code>deploy</code>, <code>packages</code>, <code>bundle</code>.</td></tr>
 </tbody>
 </table>
@@ -611,11 +615,11 @@ cp credentials.env.example ~/.snowcommander-creds.env
 chmod 600 ~/.snowcommander-creds.env
 vi ~/.snowcommander-creds.env
 
-<span class="cmt"># Load into every new shell</span>
-set -a; source ~/.snowcommander-creds.env; set +a
+<span class="cmt"># Encrypt (recommended — see #creds-encrypt)</span>
+./scripts/creds-vault.sh init && ./scripts/creds-vault.sh encrypt
 
-<span class="cmt"># Confirm without printing secrets</span>
-echo "vc=${VCENTER_USER} vc_pw=${#VCENTER_PASSWORD} ssh_pw=${#SSHPASS} cid=${FALCON_CID}"</code></pre>
+<span class="cmt"># Or load plain file temporarily (before encrypt)</span>
+set -a; source ~/.snowcommander-creds.env; set +a</code></pre>
 <table>
 <thead><tr><th>Set</th><th>Variables</th><th>Used by</th></tr></thead>
 <tbody>
@@ -631,6 +635,38 @@ variable is ever set, so a tenant that needs one works without a code change.</d
 <div class="note caution"><b>Least privilege.</b> Give the vCenter account Clone and Power On on
 <code>SnowCommander/Templates</code> only, so the restriction is enforced by vCenter permissions as well as
 by the code.</div>
+
+<h2 id="creds-encrypt">Encrypt credentials at rest</h2>
+<p>After filling in plain <code>~/.snowcommander-creds.env</code>, encrypt it with ansible-vault. You
+never type a password at runtime — a random password file is generated once and reused automatically.</p>
+<pre><code>cd /home/tpx-admin/snowcommander_scripts
+
+<span class="cmt"># 1. Create vault password file (once)</span>
+./scripts/creds-vault.sh init
+<span class="cmt"># -> ~/.snowcommander-vault.pass (mode 600) — back this up securely</span>
+
+<span class="cmt"># 2. Encrypt plain creds</span>
+./scripts/creds-vault.sh encrypt
+<span class="cmt"># -> ~/.snowcommander-creds.env.vault</span>
+<span class="cmt"># -> shreds plain .env; leaves a timestamped .plain.bak backup</span>
+
+<span class="cmt"># 3. Confirm</span>
+./scripts/creds-vault.sh status</code></pre>
+<table>
+<thead><tr><th>File</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>~/.snowcommander-creds.env.vault</code></td><td>Encrypted credentials (ansible-vault)</td></tr>
+<tr><td><code>~/.snowcommander-vault.pass</code></td><td>Vault password — required to decrypt; never commit</td></tr>
+<tr><td><code>SNOWCOMMANDER_VAULT_PASS_FILE</code></td><td>Optional — point at an existing ansible vault password file</td></tr>
+</tbody>
+</table>
+<p><b>Runtime:</b> <code>./target.sh</code>, <code>./target.sh e2e-stc</code>, and
+<code>./target.sh container deploy</code> call <code>load_creds</code>, which decrypts the vault to a
+temp file in memory — no prompt, no plain file left on disk.</p>
+<p>For direct <code>e2e_validate.sh</code> (without <code>target.sh</code>), load creds manually:</p>
+<pre><code>set -a; source &lt;(./scripts/creds-vault.sh materialize); set +a</code></pre>
+<p>Other commands: <code>edit</code>, <code>view</code>, <code>decrypt</code> — see
+<code>./scripts/creds-vault.sh help</code>.</p>
 
 <h2 id="rhsm">Red Hat subscriptions</h2>
 <p>rsyslog installs from Red Hat repositories, so an unregistered RHEL host cannot complete the syslog
@@ -658,8 +694,10 @@ component. <code>--rhsm-mode auto</code> (the default) decides from the template
 
 <span class="cmt"># 1. Credentials (never commit this file)</span>
 cp credentials.env.example ~/.snowcommander-creds.env
-<span class="cmt"># Edit: VCENTER_USER, VCENTER_PASSWORD, SSHPASS, FALCON_CID, …</span>
-set -a; source ~/.snowcommander-creds.env; set +a
+chmod 600 ~/.snowcommander-creds.env
+<span class="cmt"># Edit: VCENTER_USER, VCENTER_PASSWORD, SSHPASS, FALCON_CID, AZCM_* …</span>
+./scripts/creds-vault.sh init
+./scripts/creds-vault.sh encrypt
 
 <span class="cmt"># 2. Stage vendor RPMs (~548 MB — not in git)</span>
 cp -r /opt/snowcommander-packages/crowdstrike ./crowdstrike
@@ -671,13 +709,57 @@ podman build -t sectools-deployer:latest .
 
 <span class="cmt"># 4. Confirm the catalogue</span>
 ./target.sh list</code></pre>
-<p>Source credentials in every new shell: <code>set -a; source ~/.snowcommander-creds.env; set +a</code></p>
+
+<h2 id="methodology">Execution methodology</h2>
+<p>Three phases, two runtimes. Never mix template validation (jump host + vCenter) with fleet deploy
+(container + inventory).</p>
+
+<div class="stages">
+  <div class="stage"><div class="num">1</div><div><b>Prepare jump host</b><span>Clone repo, stage RPMs, encrypt creds, build container image</span></div></div>
+  <div class="stage"><div class="num">2</div><div><b>Validate templates (e2e)</b><span>Jump host only — <code>target.sh e2e*</code> talks to vCenter, SSHs to guest, install → verify → uninstall → restore template</span></div></div>
+  <div class="stage"><div class="num">3</div><div><b>Deploy to fleet</b><span>Container or jump host — SSH to live hostnames in <code>inventory</code>, no vCenter</span></div></div>
+</div>
+
+<h3>Phase 2 — template validation flow (8 stages)</h3>
+<table>
+<thead><tr><th>Stage</th><th>What happens</th></tr></thead>
+<tbody>
+<tr><td>1–3</td><td>Connect vCenter, find template (or reuse VM mid-cycle), power on, get IP, attach NIC to site portgroup</td></tr>
+<tr><td>4</td><td>SCP scripts to <code>/home/tpx-admin/2026snowcommander</code> on guest</td></tr>
+<tr><td>5</td><td><code>security.sh all</code> — Tanium, CrowdStrike, cmdbsync, Sentinel, syslog</td></tr>
+<tr><td>6</td><td>Verify services and packages</td></tr>
+<tr><td>7</td><td><code>uninstall.sh tanium crowdstrike sentinel</code> — retains cmdbsync + RHSM subscription on Red Hat templates</td></tr>
+<tr><td>8</td><td>Confirm scripts remain; optionally keep or shred <code>securitytools.env</code></td></tr>
+<tr><td>9</td><td>(template-cycle only) Power off and convert VM back to template</td></tr>
+</tbody>
+</table>
+
+<h3>Site quick reference</h3>
+<table>
+<thead><tr><th>Site</th><th>One-liner</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td>FW</td><td><code>./target.sh e2e fw FW-GI-7.3 --template-cycle --insecure</code></td><td>6 templates; FQDN <code>vcraeng.com</code></td></tr>
+<tr><td>BLR</td><td><code>./target.sh e2e blr BLR-Redhat-9 --template-cycle --insecure</code></td><td>6 templates; portgroup <code>VLAN-126</code></td></tr>
+<tr><td>STC</td><td><code>./target.sh e2e-stc --template-cycle --insecure</code></td><td><code>SC-Redhat 9</code> only; portgroup <code>stc-vlan847</code>; quote names with spaces</td></tr>
+</tbody>
+</table>
+<p><b>Other STC templates</b> (e.g. GI) — confirm the object lives in
+<code>IT/SnowComander/Templates</code>, then:</p>
+<pre><code>./target.sh e2e stc 'SC-GI 7.1' --template-cycle --insecure</code></pre>
+<p>GI names vary by site; list inventory first:</p>
+<pre><code>set -a; source &lt;(./scripts/creds-vault.sh materialize); set +a
+python3 scripts/vsphere_provision.py \
+  --vcenter stc-vsphere-01.strykercorp.com --list-templates --insecure</code></pre>
+<div class="note caution"><b>Creds:</b> <code>target.sh</code> auto-decrypts the vault — no manual
+<code>source</code> step. Only direct <code>e2e_validate.sh</code> calls need
+<code>source &lt;(./scripts/creds-vault.sh materialize)</code>.</div>
 
 <h2 id="paths">Jump host vs container — which path to use</h2>
 <p>These are two different workflows. Do not mix them up.</p>
 <table>
 <thead><tr><th>Goal</th><th>Command</th><th>Runs on</th></tr></thead>
 <tbody>
+<tr><td>Validate <b>STC SC-Redhat 9</b></td><td><code>./target.sh e2e-stc --template-cycle --insecure</code></td><td>Jump host</td></tr>
 <tr><td>Validate <b>one template</b> on vSphere</td><td><code>./target.sh e2e fw FW-GI-7.3 --template-cycle</code></td><td>Jump host</td></tr>
 <tr><td>Validate <b>all templates</b> on one vCenter</td><td><code>./target.sh e2e-site fw --template-cycle</code></td><td>Jump host</td></tr>
 <tr><td>Validate <b>all three vCenters</b></td><td><code>./target.sh e2e-all-sites --template-cycle</code></td><td>Jump host</td></tr>
@@ -734,8 +816,9 @@ to hostnames in an inventory file — it never talks to vCenter.</div>
 </ol>
 
 <h2 id="one-template">One template at a time</h2>
-<p>Runs on the <b>jump host</b>, not in a container. Always source credentials first:
-<code>set -a; source ~/.snowcommander-creds.env; set +a</code></p>
+<p>Runs on the <b>jump host</b>, not in a container. Use <code>./target.sh</code> — it decrypts
+encrypted creds automatically. For bare <code>e2e_validate.sh</code>, run
+<code>source &lt;(./scripts/creds-vault.sh materialize)</code> first.</p>
 
 <p>Two ways to validate a template. Pick based on whether you want a second
 object in the inventory afterwards.</p>
@@ -808,16 +891,14 @@ must never run at once, and the address must be free before you start.</div>
 <h2 id="one-vsphere">Every template in one vSphere</h2>
 <p>Runs sequentially on the jump host. Each template is round-tripped; logs go to
 <code>/tmp/e2e-&lt;site&gt;-&lt;template&gt;.log</code>.</p>
-<pre><code>set -a; source ~/.snowcommander-creds.env; set +a
-
-<span class="cmt"># All six FW templates</span>
-./target.sh e2e-site fw --template-cycle
+<pre><code><span class="cmt"># All six FW templates</span>
+./target.sh e2e-site fw --template-cycle --insecure
 
 <span class="cmt"># All six BLR templates</span>
-./target.sh e2e-site blr --template-cycle
+./target.sh e2e-site blr --template-cycle --insecure
 
 <span class="cmt"># STC — SC-Redhat 9 only</span>
-./target.sh e2e-stc --template-cycle
+./target.sh e2e-stc --template-cycle --insecure
 
 <span class="cmt"># Watch a run in progress</span>
 tail -f /tmp/e2e-fw-FW-GI-7.3.log</code></pre>
@@ -825,9 +906,7 @@ tail -f /tmp/e2e-fw-FW-GI-7.3.log</code></pre>
 <h2 id="all-three">All three vSphere at once</h2>
 <p>FW, BLR and STC run in parallel background jobs — one log file per template under
 <code>/tmp/e2e-runs/</code>. A combined summary is printed when all sites finish.</p>
-<pre><code>set -a; source ~/.snowcommander-creds.env; set +a
-
-./target.sh e2e-all-sites --template-cycle
+<pre><code>./target.sh e2e-all-sites --template-cycle --insecure
 
 <span class="cmt"># Review results</span>
 column -t /tmp/e2e-runs/summary.txt
@@ -845,15 +924,16 @@ and does <b>not</b> accept template names.</p>
 vi ./inventory   <span class="cmt"># one hostname or IP per line; comments with #</span></code></pre>
 
 <h3>Option 1 — <code>target.sh container</code> (simplest)</h3>
-<pre><code>set -a; source ~/.snowcommander-creds.env; set +a
-
+<pre><code><span class="cmt"># Decrypts ~/.snowcommander-creds.env.vault automatically</span>
 ./target.sh container plan
 ./target.sh container verify
 ./target.sh container deploy</code></pre>
 
 <h3>Option 2 — <code>podman run</code> directly</h3>
+<p>Requires a plain env file — decrypt first:
+<code>./scripts/creds-vault.sh materialize &gt; /tmp/creds.env &amp;&amp; chmod 600 /tmp/creds.env</code></p>
 <pre><code>podman run --rm \
-  --env-file ~/.snowcommander-creds.env \
+  --env-file /tmp/creds.env \
   -v ~/.ssh/id_ed25519:/run/secrets/ssh_key:ro \
   -v ./inventory:/etc/snowcommander/inventory:ro \
   -e INVENTORY=/etc/snowcommander/inventory \
@@ -862,11 +942,12 @@ vi ./inventory   <span class="cmt"># one hostname or IP per line; comments with 
 
 <span class="cmt"># then verify, then:</span>
 podman run --rm \
-  --env-file ~/.snowcommander-creds.env \
+  --env-file /tmp/creds.env \
   -v ~/.ssh/id_ed25519:/run/secrets/ssh_key:ro \
   -v ./inventory:/etc/snowcommander/inventory:ro \
   -e INVENTORY=/etc/snowcommander/inventory \
-  sectools-deployer:latest deploy all</code></pre>
+  sectools-deployer:latest deploy all
+rm -f /tmp/creds.env</code></pre>
 
 <h3>Option 3 — docker compose</h3>
 <pre><code>export INVENTORY_PATH=./inventory
