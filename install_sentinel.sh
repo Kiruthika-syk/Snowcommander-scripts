@@ -102,7 +102,7 @@ install_sentinel() {
     || [[ ${#AZCM_SP_SECRET} -lt 8 ]]; then
     fail "AZCM_SP_SECRET appears invalid or placeholder"
   fi
-  if [[ -z "${AZCM_RESOURCE_NAME:-}" ]]; then
+  if [[ -z "${AZCM_RESOURCE_NAME:-}" && "${AZCM_AUTO_RESOURCE_NAME:-0}" == "1" ]]; then
     hint="$(hostname -s 2>/dev/null || hostname)"
     mac="$(cat /sys/class/net/*/address 2>/dev/null | grep -v '^00:00:00:00:00:00$' | head -1 | tr -d ':' || true)"
     if [[ -n "$mac" && ${#mac} -ge 6 ]]; then
@@ -110,7 +110,7 @@ install_sentinel() {
     else
       export AZCM_RESOURCE_NAME="${hint}-$(cat /proc/sys/kernel/random/uuid | cut -d- -f1)"
     fi
-    log "AZCM_RESOURCE_NAME not set; using ${AZCM_RESOURCE_NAME}"
+    log "AZCM_AUTO_RESOURCE_NAME=1; using ${AZCM_RESOURCE_NAME}"
   fi
   if command -v azcmagent >/dev/null 2>&1 && [[ "${SENTINEL_FORCE_RECONNECT:-0}" != "1" ]]; then
     show="$(azcmagent show 2>/dev/null || true)"
@@ -132,8 +132,9 @@ install_sentinel() {
   AZURE_LOCATION="$AZCM_LOCATION" \
   AZURE_CLOUD="${AZCM_CLOUD:-AzureCloud}" \
   CORRELATION_ID="${AZCM_CORRELATION_ID:-$(cat /proc/sys/kernel/random/uuid)}" \
-  AZCM_TAGS="${AZCM_TAGS:-Environment=Production}" \
-  AZCM_DISCONNECT_BEFORE_CONNECT="${AZCM_DISCONNECT_BEFORE_CONNECT:-1}" \
+  AZCM_TAGS="${AZCM_TAGS:-'Cost Center'=1392,'Resource Owner'=parthav.reddy1@stryker.com}" \
+  AZCM_DISCONNECT_BEFORE_CONNECT="${AZCM_DISCONNECT_BEFORE_CONNECT:-0}" \
+  AZCM_AUTO_RESOURCE_NAME="${AZCM_AUTO_RESOURCE_NAME:-0}" \
   AZCM_RESOURCE_NAME="${AZCM_RESOURCE_NAME}" \
   PORTAL_SUDO_PASSWORD="${PORTAL_SUDO_PASSWORD:-${SSHPASS:-}}" \
   bash "$script"

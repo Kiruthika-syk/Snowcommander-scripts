@@ -40,7 +40,7 @@ x-common: &common
     AZCM_RESOURCE_GROUP: "${AZCM_RESOURCE_GROUP:-}"
     AZCM_LOCATION: "${AZCM_LOCATION:-eastus2}"
     AZCM_CLOUD: "${AZCM_CLOUD:-AzureCloud}"
-    AZCM_TAGS: "${AZCM_TAGS:-Environment=Production}"
+    AZCM_TAGS: "${AZCM_TAGS:-'Cost Center'=1392,'Resource Owner'=parthav.reddy1@stryker.com}"
     SYSLOG_SERVER1: "${SYSLOG_SERVER1:-10.132.118.100}"
     SYSLOG_SERVER2: "${SYSLOG_SERVER2:-10.50.118.100}"
     SYSLOG_PORT: "${SYSLOG_PORT:-514}"

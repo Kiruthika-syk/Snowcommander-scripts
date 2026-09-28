@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Sentinel unified operator script (Install + Reconnect — same path)
-# Portal uploads this to targets; credentials injected via environment.
+#
+# Behavior aligned with Azure Portal LinuxOnBoardingScript (Sep 2026):
+#   wget https://aka.ms/azcmagent → bash install_linux_azcmagent.sh → azcmagent connect
+# Credentials and tags come from environment (securitytools.env), not hardcoded SP secrets.
 # ==============================================================================
 set -euo pipefail
 
@@ -142,8 +145,9 @@ AZURE_SUBSCRIPTION_ID="${AZURE_SUBSCRIPTION_ID:-${AZCM_SUBSCRIPTION_ID:-}}"
 AZURE_RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-${AZCM_RESOURCE_GROUP:-}}"
 AZURE_LOCATION="${AZURE_LOCATION:-${AZCM_LOCATION:-eastus2}}"
 AZURE_CLOUD="${AZURE_CLOUD:-${AZCM_CLOUD:-AzureCloud}}"
-CORRELATION_ID="${CORRELATION_ID:-${AZCM_CORRELATION_ID:-blr-usa-unified-fallback}}"
-AZCM_TAGS="${AZCM_TAGS:-Owner=Swetha Palankar & Partha Nayak,Environment=Production,SyncNode=BLR-USA}"
+CORRELATION_ID="${CORRELATION_ID:-${AZCM_CORRELATION_ID:-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s)}}"
+# Portal script tag format (override via AZCM_TAGS in securitytools.env)
+AZCM_TAGS="${AZCM_TAGS:-'Cost Center'=1392,'Resource Owner'=parthav.reddy1@stryker.com}"
 
 for v in AZURE_CLIENT_ID AZURE_CLIENT_SECRET AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID AZURE_RESOURCE_GROUP; do
   if [ -z "${!v:-}" ]; then
@@ -192,10 +196,12 @@ else
   echo "$output"
   chmod 755 "$INSTALLER"
 
-  if ! portal_sudo bash "$INSTALLER"; then
-    echo "Installation execution failed. Routing telemetry to gbl.his.arc.azure.com..."
-    arc_telemetry "InstallScriptFailed" "bash install_linux_azcmagent.sh failed"
-    exit 1
+  if ! bash "$INSTALLER" 2>&1; then
+    if ! portal_sudo bash "$INSTALLER"; then
+      echo "Installation execution failed. Routing telemetry to gbl.his.arc.azure.com..."
+      arc_telemetry "InstallScriptFailed" "bash install_linux_azcmagent.sh failed"
+      exit 1
+    fi
   fi
 fi
 
@@ -204,8 +210,8 @@ command -v azcmagent >/dev/null 2>&1 || {
   exit 1
 }
 
-# 3. Connect — force-clear stale Disconnected registration, then connect
-AZCM_DISCONNECT_BEFORE_CONNECT="${AZCM_DISCONNECT_BEFORE_CONNECT:-1}"
+# 3. Connect (portal script connects immediately after install; no preemptive disconnect)
+AZCM_DISCONNECT_BEFORE_CONNECT="${AZCM_DISCONNECT_BEFORE_CONNECT:-0}"
 need_disconnect=0
 if [ "$AZCM_DISCONNECT_BEFORE_CONNECT" = "1" ] || [ "$AZCM_DISCONNECT_BEFORE_CONNECT" = "true" ]; then
   need_disconnect=1
@@ -218,24 +224,30 @@ if [ "$need_disconnect" -eq 1 ]; then
   arc_disconnect_stale
 fi
 
-if [ -z "${AZCM_RESOURCE_NAME:-}" ]; then
+if [ -z "${AZCM_RESOURCE_NAME:-}" ] && [ "${AZCM_AUTO_RESOURCE_NAME:-0}" = "1" ]; then
   AZCM_RESOURCE_NAME="$(default_azcm_resource_name)"
-  echo "AZCM: using resource name ${AZCM_RESOURCE_NAME} (set AZCM_RESOURCE_NAME to override)"
+  echo "AZCM: using resource name ${AZCM_RESOURCE_NAME} (AZCM_AUTO_RESOURCE_NAME=1)"
 fi
 
-echo "Executing azcmagent connect to ${AZURE_LOCATION} as ${AZCM_RESOURCE_NAME}..."
+if [ -n "${AZCM_RESOURCE_NAME:-}" ]; then
+  echo "Executing azcmagent connect to ${AZURE_LOCATION} as ${AZCM_RESOURCE_NAME}..."
+else
+  echo "Executing azcmagent connect to ${AZURE_LOCATION} (portal default resource naming)..."
+fi
 connect_args=(
   --service-principal-id "$AZURE_CLIENT_ID"
   --service-principal-secret "$AZURE_CLIENT_SECRET"
-  --tenant-id "$AZURE_TENANT_ID"
-  --subscription-id "$AZURE_SUBSCRIPTION_ID"
   --resource-group "$AZURE_RESOURCE_GROUP"
+  --tenant-id "$AZURE_TENANT_ID"
   --location "$AZURE_LOCATION"
+  --subscription-id "$AZURE_SUBSCRIPTION_ID"
   --cloud "$AZURE_CLOUD"
-  --correlation-id "$CORRELATION_ID"
   --tags "$AZCM_TAGS"
-  --resource-name "$AZCM_RESOURCE_NAME"
+  --correlation-id "$CORRELATION_ID"
 )
+if [ -n "${AZCM_RESOURCE_NAME:-}" ]; then
+  connect_args+=(--resource-name "$AZCM_RESOURCE_NAME")
+fi
 
 set +e
 connect_out=$(portal_sudo azcmagent connect "${connect_args[@]}" 2>&1)
