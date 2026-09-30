@@ -42,6 +42,7 @@
 #
 #   scripts/e2e_validate.sh ... --existing-host blr-gi-6   # skip stages 1-3
 #   scripts/e2e_validate.sh ... --keep-tools               # skip stage 7
+#   scripts/e2e_validate.sh ... --bundle-only              # stage 4 only (scripts/env), skip install/uninstall
 #   scripts/e2e_validate.sh ... --remote-dir /opt/foo      # script location
 #
 # --template-cycle is shorthand for:
@@ -78,6 +79,7 @@ CONFIRM_DESTROY=0
 INSECURE=""
 EXISTING_HOST=""
 KEEP_TOOLS=0
+BUNDLE_ONLY=0
 KEEP_VM=0
 IP_TIMEOUT=300
 # sshd often starts after VMware Tools first reports an address.
@@ -291,6 +293,7 @@ while [[ $# -gt 0 ]]; do
     --existing-host) EXISTING_HOST="${2:?}"; shift 2 ;;
     --components) COMPONENTS="${2:?}"; shift 2 ;;
     --keep-tools) KEEP_TOOLS=1; shift ;;
+    --bundle-only) BUNDLE_ONLY=1; shift ;;
     --keep-vm) KEEP_VM=1; shift ;;
     --rhsm-mode) RHSM_MODE="${2:?}"; shift 2 ;;
     --keep-legacy) PURGE_LEGACY=0; shift ;;
@@ -758,6 +761,15 @@ fi
 
 stage_pass "${placed} files placed in ${REMOTE_DIR}"
 
+if ((BUNDLE_ONLY)); then
+  stage_begin 5 "INSTALL THE SECURITY TOOLS"
+  stage_skip "bundle-only: sentinel/scripts refreshed on disk, no install"
+  stage_begin 6 "VERIFY SERVICE STATUS WITH SYSTEMCTL"
+  stage_skip "bundle-only"
+  stage_begin 7 "UNINSTALL THE TOOLS"
+  stage_skip "bundle-only"
+else
+
 # ==============================================================================
 # Stage 5 - install
 # ==============================================================================
@@ -888,7 +900,11 @@ fi
 # Stage 7 - uninstall
 # ==============================================================================
 stage_begin 7 "UNINSTALL THE TOOLS"
-if ((KEEP_TOOLS)); then
+fi  # end ! BUNDLE_ONLY install/verify block — stage 7 header always runs below
+
+if ((BUNDLE_ONLY)); then
+  :
+elif ((KEEP_TOOLS)); then
   stage_skip "--keep-tools was supplied"
 else
   info "removing: ${UNINSTALL_COMPONENTS}"

@@ -90,6 +90,7 @@ Commands:
   e2e <site> <template>        validate one template (clone mode by default)
   e2e-stc                      validate STC SC-Redhat 9 (template-cycle default)
   e2e-redhat9-all-sites        BLR-Redhat-9 + FW-Redhat-9 + SC-Redhat 9 (template-cycle default)
+  e2e-bundle-all-sites         all BLR + FW templates + SC-Redhat 9 — scripts/env only (--bundle-only)
   e2e-site <site>              validate every template on one vCenter
   e2e-all-sites                validate all sites (background jobs, one log each)
   existing <hostname>          run stages 4-8 on a host that already exists
@@ -179,6 +180,7 @@ parse_common_opts() {
       --template-cycle) E2E_TEMPLATE_CYCLE=1; shift ;;
       --clone) E2E_TEMPLATE_CYCLE=0; shift ;;
       --keep-tools) E2E_EXTRA+=(--keep-tools); shift ;;
+      --bundle-only) E2E_EXTRA+=(--bundle-only); shift ;;
       --portgroup) E2E_EXTRA+=(--portgroup "$2"); shift 2 ;;
       --parallel) FLEET_PARALLEL="$2"; shift 2 ;;
       --components)
@@ -280,6 +282,35 @@ cmd_e2e_site() {
       rc=$?
     fi
   done
+  exit "$rc"
+}
+
+cmd_e2e_bundle_all_sites() {
+  parse_common_opts "$@"
+  load_creds
+  (( E2E_TEMPLATE_CYCLE )) || E2E_TEMPLATE_CYCLE=1
+  E2E_EXTRA+=(--bundle-only)
+  (( E2E_INSECURE )) || E2E_EXTRA+=(--insecure)
+
+  local site t rc=0
+  for site in blr fw; do
+    local -a templates=()
+    site_templates "$site" templates
+    for t in "${templates[@]}"; do
+      log "========== bundle-only ${site} / ${t} =========="
+      if run_e2e "$site" "$t" 2>&1 | tee "/tmp/e2e-bundle-${site}-$(echo "$t" | tr ' ' '-').log"; then
+        :
+      else
+        rc=$?
+      fi
+    done
+  done
+  log "========== bundle-only stc / ${REDHAT9_TEMPLATE_stc} =========="
+  if run_e2e stc "$REDHAT9_TEMPLATE_stc" 2>&1 | tee "/tmp/e2e-bundle-stc-SC-Redhat-9.log"; then
+    :
+  else
+    rc=$?
+  fi
   exit "$rc"
 }
 
@@ -461,6 +492,10 @@ main() {
     e2e-redhat9-all-sites)
       shift || true
       cmd_e2e_redhat9_all_sites "$@"
+      ;;
+    e2e-bundle-all-sites)
+      shift || true
+      cmd_e2e_bundle_all_sites "$@"
       ;;
     e2e-site) load_creds; cmd_e2e_site "$@" ;;
     e2e-all-sites) cmd_e2e_all_sites "$@" ;;
