@@ -14,6 +14,7 @@
 #   ./target.sh list-vcenter fw
 #   ./target.sh e2e fw FW-Redhat-9
 #   ./target.sh e2e-site blr --template-cycle
+#   ./target.sh e2e-redhat9-all-sites --template-cycle --insecure
 #   ./target.sh e2e-all-sites --template-cycle
 #   ./target.sh existing blr-gi-6
 #   ./target.sh write-inventory ./inventory
@@ -69,6 +70,11 @@ SITE_TEMPLATES_stc=(
   "$STC_TEMPLATE"
 )
 
+# RHEL 9 security-tools templates — one per site (Sentinel bundle refresh target).
+REDHAT9_TEMPLATE_blr='BLR-Redhat-9'
+REDHAT9_TEMPLATE_fw='FW-Redhat-9'
+REDHAT9_TEMPLATE_stc="$STC_TEMPLATE"
+
 log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 die() { log "ERROR: $*"; exit 2; }
 
@@ -83,6 +89,7 @@ Commands:
 
   e2e <site> <template>        validate one template (clone mode by default)
   e2e-stc                      validate STC SC-Redhat 9 (template-cycle default)
+  e2e-redhat9-all-sites        BLR-Redhat-9 + FW-Redhat-9 + SC-Redhat 9 (template-cycle default)
   e2e-site <site>              validate every template on one vCenter
   e2e-all-sites                validate all sites (background jobs, one log each)
   existing <hostname>          run stages 4-8 on a host that already exists
@@ -108,6 +115,7 @@ Examples:
   ./target.sh list
   ./target.sh e2e fw FW-Redhat-9 --template-cycle --insecure
   ./target.sh e2e-stc --template-cycle --insecure
+  ./target.sh e2e-redhat9-all-sites --template-cycle --insecure
   ./target.sh e2e-site blr --template-cycle --insecure
   ./target.sh write-inventory && ./target.sh plan
   ./target.sh container deploy
@@ -173,7 +181,11 @@ parse_common_opts() {
       --keep-tools) E2E_EXTRA+=(--keep-tools); shift ;;
       --portgroup) E2E_EXTRA+=(--portgroup "$2"); shift 2 ;;
       --parallel) FLEET_PARALLEL="$2"; shift 2 ;;
-      --components) FLEET_COMPONENTS="$2"; shift 2 ;;
+      --components)
+        FLEET_COMPONENTS="$2"
+        E2E_EXTRA+=(--components "$2")
+        shift 2
+        ;;
       --insecure) E2E_INSECURE=1; shift ;;
       --fqdn-domain) E2E_EXTRA+=(--fqdn-domain "$2"); shift 2 ;;
       --rhsm-mode) E2E_EXTRA+=(--rhsm-mode "$2"); shift 2 ;;
@@ -263,6 +275,31 @@ cmd_e2e_site() {
   for t in "${templates[@]}"; do
     log "========== ${site} / ${t} =========="
     if run_e2e "$site" "$t" 2>&1 | tee "/tmp/e2e-${site}-${t}.log"; then
+      :
+    else
+      rc=$?
+    fi
+  done
+  exit "$rc"
+}
+
+cmd_e2e_redhat9_all_sites() {
+  parse_common_opts "$@"
+  load_creds
+  (( E2E_TEMPLATE_CYCLE )) || E2E_TEMPLATE_CYCLE=1
+  (( E2E_INSECURE )) || E2E_EXTRA+=(--insecure)
+
+  local -a runs=(
+    "blr:${REDHAT9_TEMPLATE_blr}"
+    "fw:${REDHAT9_TEMPLATE_fw}"
+    "stc:${REDHAT9_TEMPLATE_stc}"
+  )
+  local entry site template rc=0
+  for entry in "${runs[@]}"; do
+    site="${entry%%:*}"
+    template="${entry#*:}"
+    log "========== RHEL 9 ${site} / ${template} =========="
+    if run_e2e "$site" "$template" 2>&1 | tee "/tmp/e2e-redhat9-${site}.log"; then
       :
     else
       rc=$?
@@ -420,6 +457,10 @@ main() {
       parse_common_opts "$@"
       (( E2E_INSECURE )) || E2E_EXTRA+=(--insecure)
       run_e2e stc "$STC_TEMPLATE"
+      ;;
+    e2e-redhat9-all-sites)
+      shift || true
+      cmd_e2e_redhat9_all_sites "$@"
       ;;
     e2e-site) load_creds; cmd_e2e_site "$@" ;;
     e2e-all-sites) cmd_e2e_all_sites "$@" ;;
