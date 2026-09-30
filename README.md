@@ -24,6 +24,7 @@ chmod 600 ~/.snowcommander-creds.env
 
 ./target.sh list
 ./target.sh e2e-stc --template-cycle --insecure   # STC SC-Redhat 9
+./target.sh e2e-redhat9-all-sites --template-cycle --insecure   # BLR + FW + STC RHEL 9
 ```
 
 `target.sh` auto-decrypts `~/.snowcommander-creds.env.vault` — no password prompt at runtime.
