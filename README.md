@@ -19,15 +19,15 @@ cp credentials.env.example ~/.snowcommander-creds.env
 chmod 600 ~/.snowcommander-creds.env
 # Edit VCENTER_*, SSHPASS, FALCON_CID, AZCM_*, RHSM_*, …
 
-./scripts/creds-vault.sh init
-./scripts/creds-vault.sh encrypt
+cp securitytools.env.example securitytools.env && chmod 600 securitytools.env
+# Edit securitytools.env — all variables including AZCM_SP_SECRET stay in this one file.
 
 ./target.sh list
 ./target.sh e2e-stc --template-cycle --insecure   # STC SC-Redhat 9
-./target.sh e2e-redhat9-all-sites --template-cycle --insecure   # BLR + FW + STC RHEL 9
+./target.sh e2e-bundle-all-sites --template-cycle --insecure   # all BLR+FW+SC templates, scripts/env only
 ```
 
-`target.sh` auto-decrypts `~/.snowcommander-creds.env.vault` — no password prompt at runtime.
+`target.sh` reads `./securitytools.env` and writes it onto templates during bundle/e2e stage 4.
 
 ## Other sites
 

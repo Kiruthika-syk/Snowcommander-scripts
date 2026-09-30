@@ -6,8 +6,8 @@
 # execution path: vSphere validation, fleet deploy over SSH, container, and
 # GitHub Actions.
 #
-# Credentials live in ~/.snowcommander-creds.env (see credentials.env.example).
-# Nothing secret is passed on the command line.
+# All settings and secrets live in ./securitytools.env (see securitytools.env.example).
+# That file is copied onto each template during e2e stage 4 (mode 600).
 #
 # Usage:
 #   ./target.sh list
@@ -27,9 +27,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CREDS_FILE="${CREDS_FILE:-${HOME}/.snowcommander-creds.env}"
-CREDS_VAULT="${CREDS_VAULT:-${CREDS_FILE}.vault}"
-VAULT_PASS="${SNOWCOMMANDER_VAULT_PASS_FILE:-${HOME}/.snowcommander-vault.pass}"
+CREDS_FILE="${CREDS_FILE:-${BASE_DIR}/securitytools.env}"
 INVENTORY="${INVENTORY:-${BASE_DIR}/inventory}"
 IMAGE="${SECTOOLS_IMAGE:-sectools-deployer:latest}"
 
@@ -112,7 +110,8 @@ Common options (append after the command):
   --insecure                   skip vCenter TLS verification
 
 Examples:
-  set -a; source ~/.snowcommander-creds.env; set +a
+  cp securitytools.env.example securitytools.env   # once, then edit secrets
+  chmod 600 securitytools.env
   ./target.sh list
   ./target.sh e2e fw FW-Redhat-9 --template-cycle --insecure
   ./target.sh e2e-stc --template-cycle --insecure
@@ -124,30 +123,10 @@ EOF
 }
 
 load_creds() {
-  local tmp="" src=""
-
-  if [[ -r "$CREDS_FILE" ]] \
-    && ! grep -q '^\$ANSIBLE_VAULT;' "$CREDS_FILE" 2>/dev/null; then
-    src="$CREDS_FILE"
-  elif [[ -r "$CREDS_VAULT" ]]; then
-    command -v ansible-vault >/dev/null 2>&1 \
-      || die "ansible-vault required to read ${CREDS_VAULT}"
-    [[ -r "$VAULT_PASS" ]] \
-      || die "vault password file missing: ${VAULT_PASS} (run: ./scripts/creds-vault.sh init)"
-    tmp="$(mktemp)"
-    chmod 600 "$tmp"
-    if ! ansible-vault view "$CREDS_VAULT" --vault-password-file "$VAULT_PASS" >"$tmp" 2>/dev/null; then
-      rm -f "$tmp"
-      die "failed to decrypt ${CREDS_VAULT} (wrong vault password?)"
-    fi
-    src="$tmp"
-  else
-    die "credentials not found: ${CREDS_FILE} or ${CREDS_VAULT} (see credentials.env.example)"
-  fi
-
+  [[ -r "$CREDS_FILE" ]] \
+    || die "missing ${CREDS_FILE} — copy securitytools.env.example, fill every value, chmod 600"
   # shellcheck disable=SC1090
-  set -a; source "$src"; set +a
-  [[ -n "$tmp" ]] && rm -f "$tmp"
+  set -a; source "$CREDS_FILE"; set +a
 }
 
 resolve_site() {
@@ -445,15 +424,8 @@ container_run() {
   fi
 
   load_creds
-  local env_file="$CREDS_FILE" env_tmp=""
-  if [[ ! -r "$CREDS_FILE" && -r "$CREDS_VAULT" ]]; then
-    env_tmp="$(mktemp)"
-    chmod 600 "$env_tmp"
-    ansible-vault view "$CREDS_VAULT" --vault-password-file "$VAULT_PASS" >"$env_tmp"
-    env_file="$env_tmp"
-  fi
   exec "$RUNNER" run --rm \
-    --env-file "$env_file" \
+    --env-file "$CREDS_FILE" \
     -v "${SSH_KEY_FILE:-${HOME}/.ssh/id_ed25519}:/run/secrets/ssh_key:ro" \
     -v "${INVENTORY}:/etc/snowcommander/inventory:ro" \
     -e INVENTORY=/etc/snowcommander/inventory \
