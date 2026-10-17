@@ -497,7 +497,23 @@ def connect_nic(content, vm, portgroup=None):
     return True
 
 
-def power_on_and_wait(vm, timeout: int):
+def pick_guest_ipv4(vm) -> str | None:
+    """IPv4 from VMware Tools primary address or any guest NIC."""
+    primary = vm.guest.ipAddress
+    if primary and ":" not in primary and not primary.startswith(("169.254.", "127.")):
+        return primary
+    for nic in vm.guest.net or []:
+        cfg = getattr(nic, "ipConfig", None)
+        if not cfg:
+            continue
+        for addr in cfg.ipAddress or []:
+            ip = addr.ipAddress
+            if ip and ":" not in ip and not ip.startswith(("169.254.", "127.")):
+                return ip
+    return None
+
+
+def power_on_and_wait(vm, timeout: int, *, allow_no_ip: bool = False):
     if vm.runtime.powerState != vim.VirtualMachinePowerState.poweredOn:
         log("3/8 POWER", "powering on")
         wait_task(vm.PowerOnVM_Task(), "power on")
@@ -507,20 +523,58 @@ def power_on_and_wait(vm, timeout: int):
     log("3/8 POWER", f"waiting up to {timeout}s for VMware Tools and an IPv4 address")
     deadline, last = time.time() + timeout, ""
     while time.time() < deadline:
-        state = f"tools={vm.guest.toolsRunningStatus} ip={vm.guest.ipAddress}"
+        ip = pick_guest_ipv4(vm)
+        state = f"tools={vm.guest.toolsRunningStatus} ip={vm.guest.ipAddress} picked={ip}"
         if state != last:
             log("3/8 POWER", state)
             last = state
-        ip = vm.guest.ipAddress
-        if ip and ":" not in ip and not ip.startswith(("169.254.", "127.")):
+        if ip:
             log("3/8 POWER", f"guest reachable at {ip}")
             return ip
         time.sleep(5)
+
+    if allow_no_ip:
+        log("3/8 POWER", "no IPv4 yet; continuing (Guest Operations may still work)")
+        return None
 
     fail(RC_POWER,
          "timed out waiting for an IP. Check VMware Tools is installed in the "
          "template, the NIC is on a portgroup with DHCP, or supply a guest "
          "customization spec for a static address.")
+
+
+def parse_env_keys(text: str, keys: list[str]) -> dict[str, str]:
+    wanted = set(keys)
+    found: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, val = line.split("=", 1)
+        if key in wanted:
+            found[key] = val
+    return found
+
+
+def guest_read_env_keys(content, vm_name: str, guest_path: str, keys: list[str]) -> dict[str, str]:
+    vm = find_vm_by_name(content, vm_name)
+    if vm is None:
+        fail(RC_NOTFOUND, f"VM '{vm_name}' not found inside {ALLOWED_FOLDER_LABEL}")
+    if vm.runtime.powerState != vim.VirtualMachinePowerState.poweredOn:
+        log("GUEST ENV", f"powering on '{vm_name}' for Guest Operations")
+        wait_task(vm.PowerOnVM_Task(), "power on")
+    if not wait_for_guest_tools(vm):
+        fail(RC_GUEST, "VMware Tools is not running; cannot read guest env file")
+    guest_user = os.environ.get("TARGET_SSH_USER", "tpx-admin")
+    guest_pass = os.environ.get("SSHPASS", "")
+    if not guest_pass:
+        fail(RC_USAGE, "set SSHPASS for guest file read (guest login)")
+    auth = vim.vm.guest.NamePasswordAuthentication(
+        username=guest_user, password=guest_pass, interactiveSession=False)
+    body = guest_read_file(content, vm, auth, guest_path)
+    if not body:
+        fail(RC_GUEST, f"could not read {guest_path} from guest")
+    return parse_env_keys(body, keys)
 
 
 # ----------------------------------------------------------------------------
@@ -671,7 +725,8 @@ def guest_read_file(content, vm, auth, guest_path: str) -> str:
     try:
         info = fm.InitiateFileTransferFromGuest(
             vm=vm, auth=auth, guestFilePath=guest_path)
-        with urllib.request.urlopen(info.url, timeout=30) as resp:
+        ctx = ssl._create_unverified_context()
+        with urllib.request.urlopen(info.url, timeout=30, context=ctx) as resp:
             return resp.read().decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001
         log("GUEST SSH", f"could not read {guest_path}: {exc}")
@@ -764,7 +819,13 @@ def main() -> int:
     p.add_argument("--no-power-on", action="store_true")
     p.add_argument("--guest-remedy-ssh", action="store_true",
                    help="fix sshd_config and start sshd via VMware Guest Operations")
-    p.add_argument("--vm-name", help="target VM name for --guest-remedy-ssh")
+    p.add_argument("--guest-read-env", action="store_true",
+                   help="read KEY=value lines from a guest file via Guest Operations")
+    p.add_argument("--env-guest-path", help="guest path for --guest-read-env")
+    p.add_argument("--env-keys", help="comma-separated keys for --guest-read-env")
+    p.add_argument("--allow-no-ip", action="store_true",
+                   help="after power-on, return success with ip=null if no IPv4 yet")
+    p.add_argument("--vm-name", help="target VM name for guest-side operations")
     args = p.parse_args()
 
     # Validate destructive intent before opening a connection, so the run
@@ -812,6 +873,17 @@ def main() -> int:
         print(json.dumps({"vm_name": vm_name, "ssh_remedy": "applied"}))
         return RC_OK
 
+    if args.guest_read_env:
+        vm_name = args.vm_name or args.template
+        if not vm_name or not args.env_guest_path or not args.env_keys:
+            fail(RC_USAGE,
+                 "--guest-read-env requires --vm-name (or --template), "
+                 "--env-guest-path, and --env-keys")
+        keys = [k.strip() for k in args.env_keys.split(",") if k.strip()]
+        env_keys = guest_read_env_keys(content, vm_name, args.env_guest_path, keys)
+        print(json.dumps({"vm_name": vm_name, "env_keys": env_keys}))
+        return RC_OK
+
     if not args.template:
         fail(RC_USAGE, "--template is required (or use --list-templates)")
 
@@ -830,7 +902,8 @@ def main() -> int:
                 f"'{args.template}' is already a virtual machine from an earlier "
                 f"run - reusing it instead of converting again")
             connect_nic(content, vm, args.portgroup)
-            ip = None if args.no_power_on else power_on_and_wait(vm, args.ip_timeout)
+            ip = None if args.no_power_on else power_on_and_wait(
+                vm, args.ip_timeout, allow_no_ip=args.allow_no_ip)
             print(json.dumps({
                 "vm_name": vm.name, "ip": ip, "mode": args.mode,
                 "template": args.template,
@@ -860,7 +933,8 @@ def main() -> int:
 
     connect_nic(content, vm, args.portgroup)
 
-    ip = None if args.no_power_on else power_on_and_wait(vm, args.ip_timeout)
+    ip = None if args.no_power_on else power_on_and_wait(
+        vm, args.ip_timeout, allow_no_ip=args.allow_no_ip)
 
     print(json.dumps({
         "vm_name": vm.name,

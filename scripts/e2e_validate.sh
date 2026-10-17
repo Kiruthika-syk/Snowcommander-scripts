@@ -706,6 +706,12 @@ echo "    --- any stray RPMs elsewhere in the home directory ---"
 rsh "find \$HOME -name 'falcon-sensor*.rpm' -o -name 'TaniumClient*.rpm' 2>/dev/null \
      | grep -v '^${REMOTE_DIR}' || echo 'none'" 2>/dev/null | sed 's/^/      /'
 
+# Sentinel needs AZCM_SP_SECRET on the template securitytools.env after clone.
+if [[ -z "${AZCM_SP_SECRET:-}" || ${#AZCM_SP_SECRET} -lt 8 ]] \
+  || [[ "$AZCM_SP_SECRET" == *REPLACE* || "$AZCM_SP_SECRET" == *CHANGEME* ]]; then
+  stage_fail "AZCM_SP_SECRET missing or invalid in jump-host env; set it in securitytools.env before baking templates"
+fi
+
 # Secrets go on their own channel into a 0600 file.
 envfile="$(mktemp)"
 chmod 600 "$envfile"
@@ -725,6 +731,12 @@ if [[ -n "$missing_keys" ]]; then
   info "WARNING: keys absent from the target env file:${missing_keys}"
 else
   info "verified: all ${#ENV_KEYS[@]} variables present on the target"
+fi
+
+if rsh "grep -qE '^AZCM_SP_SECRET=.{8,}' ${REMOTE_DIR}/securitytools.env" 2>/dev/null; then
+  info "verified: AZCM_SP_SECRET is present on the template (Sentinel install will work from securitytools.env)"
+else
+  stage_fail "AZCM_SP_SECRET did not land on the template securitytools.env"
 fi
 
 # --- FQDN entry in /etc/hosts -------------------------------------------------
@@ -990,6 +1002,11 @@ case "$ENV_DISPOSITION" in
   keep)
     info "securitytools.env: KEEPING credentials on the template"
     info "  every VM cloned from this template will carry them on disk"
+    if rsh "grep -qE '^AZCM_SP_SECRET=.{8,}' ${REMOTE_DIR}/securitytools.env" 2>/dev/null; then
+      info "verified: AZCM_SP_SECRET remains on the template for Sentinel"
+    else
+      stage_fail "AZCM_SP_SECRET missing on template after finalisation (use --env-disposition keep)"
+    fi
     ;;
 
   shred)
@@ -1048,9 +1065,15 @@ HDR
 esac
 
 final_count="$(rsh "find ${REMOTE_DIR} -type f | wc -l" 2>/dev/null || echo 0)"
+stage8_detail="all scripts present (${final_count} files)"
+case "$ENV_DISPOSITION" in
+  keep) stage8_detail="${stage8_detail}; AZCM_SP_SECRET kept on template" ;;
+  sanitize) stage8_detail="${stage8_detail}; credentials blanked (Sentinel needs AZCM_SP_SECRET at deploy)" ;;
+  shred) stage8_detail="${stage8_detail}; securitytools.env removed" ;;
+esac
 echo
 if ((missing == 0)); then
-  stage_pass "all scripts present (${final_count} files) and secrets removed"
+  stage_pass "$stage8_detail"
 else
   stage_fail "${missing} expected script(s) missing from ${REMOTE_DIR}"
 fi

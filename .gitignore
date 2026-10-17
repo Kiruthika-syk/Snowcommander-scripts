@@ -25,6 +25,7 @@ inventory.*
 !inventory.example
 
 # Runtime artefacts
+__pycache__/
 *.log
 *.sectools-bak.*
 .deploy-staging/

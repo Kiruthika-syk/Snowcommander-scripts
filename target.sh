@@ -28,6 +28,7 @@ IFS=$'\n\t'
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CREDS_FILE="${CREDS_FILE:-${BASE_DIR}/securitytools.env}"
+VCENTER_ENV="${VCENTER_ENV:-${BASE_DIR}/vcenter.env}"
 INVENTORY="${INVENTORY:-${BASE_DIR}/inventory}"
 IMAGE="${SECTOOLS_IMAGE:-sectools-deployer:latest}"
 
@@ -127,6 +128,10 @@ load_creds() {
     || die "missing ${CREDS_FILE} — copy securitytools.env.example, fill every value, chmod 600"
   # shellcheck disable=SC1090
   set -a; source "$CREDS_FILE"; set +a
+  if [[ -r "$VCENTER_ENV" ]]; then
+    # shellcheck disable=SC1090
+    set -a; source "$VCENTER_ENV"; set +a
+  fi
 }
 
 resolve_site() {
@@ -221,6 +226,7 @@ cmd_list() {
   done
   printf 'Fleet inventory file: %s\n' "$INVENTORY"
   printf 'Credentials file:     %s\n' "$CREDS_FILE"
+  printf 'vCenter env file:     %s\n' "$VCENTER_ENV"
 }
 
 cmd_list_vcenter() {
